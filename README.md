@@ -66,6 +66,9 @@ public API.
 - Provenance supports external reproduction without imposing one universal provenance format.
 - Uncertainty and missing evidence must remain visible.
 
+The ecological/artificial distinction and the recommended cell-seal JSON fields
+are documented in [`docs/provenance.md`](docs/provenance.md).
+
 ## Repository structure
 
 ```text
