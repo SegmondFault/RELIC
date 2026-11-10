@@ -1,0 +1,9 @@
+---
+args:
+  named:
+    - name: output
+      type: string
+---
+// Use tools/export_analysis.py to publish an output plus its reproducibility manifest.
+// This sink writes only a derived local artifact, never authoritative RELIC data.
+to_file $output { write_parquet }

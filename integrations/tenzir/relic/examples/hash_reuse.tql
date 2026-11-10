@@ -1,0 +1,12 @@
+// Active occurrences; full and specific hashes analysed independently, excluding only each missing hash.
+// Deduplicate each binary/kind/hash, then count distinct binaries. High-memory aggregation.
+// Pin RELIC_CHECKPOINT. Fixture data supports no scientific claims.
+relic::functions checkpoint=env("RELIC_CHECKPOINT")
+hashes = [{kind: "full", hash: full_hash}, {kind: "specific", hash: specific_hash}]
+unroll hashes
+this = {binary_id: binary_id, kind: hashes.kind, hash: hashes.hash}
+where hash != null
+deduplicate binary_id, kind, hash
+summarize kind, hash, binaries=count()
+where binaries > 1
+sort kind, hash

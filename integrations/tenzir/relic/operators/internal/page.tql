@@ -1,0 +1,69 @@
+---
+args:
+  named:
+    - name: checkpoint
+      type: string
+    - name: schema
+      type: string
+    - name: base
+      type: string
+    - name: endpoint
+      type: string
+---
+_expected = {checkpoint: $checkpoint, schema: $schema, base: $base, endpoint: $endpoint}
+python "
+from urllib.parse import urlsplit, parse_qs
+from collections.abc import Mapping
+expected = self._expected
+required = {'schema_version', 'checkpoint', 'items', 'next_url'}
+if not required.issubset(self):
+    raise ValueError('RELIC malformed page envelope')
+if self.checkpoint != expected['checkpoint']:
+    raise ValueError('RELIC checkpoint mismatch')
+if self.schema_version != expected['schema']:
+    raise ValueError('RELIC schema version mismatch')
+if not isinstance(self['items'], list):
+    raise ValueError('RELIC items must be an array')
+for item in self['items']:
+    if not isinstance(item, Mapping) or not isinstance(item.get('id'), str) or not item['id']:
+        raise ValueError('RELIC item requires a nonempty id')
+    if type(item.get('revoked')) is not bool:
+        raise ValueError('RELIC item requires explicit revoked boolean')
+    shapes = {
+        'functions': ['binary_id', 'fidbf_id', 'bsim_id', 'full_hash', 'specific_hash', 'compiler', 'architecture', 'is_ecological', 'provenance_id'],
+        'binaries': ['binary_id'],
+        'bsim-memberships': ['function_id', 'bsim_id'],
+        'classifications': ['function_id', 'classification', 'confidence'],
+        'seals': ['schema_name', 'schema_version', 'stored_digest', 'signature', 'seal', 'seal_bytes_base64'],
+        'integrity': ['record_id', 'record_hash', 'chain_hash', 'system_signature'],
+    }
+    if not set(shapes[expected['endpoint']]).issubset(item):
+        raise ValueError('RELIC missing required analytical fields')
+    if expected['endpoint'] == 'functions':
+        if not isinstance(item['binary_id'], str):
+            raise ValueError('RELIC function binary_id must be a string')
+        for key in ['fidbf_id', 'bsim_id', 'provenance_id']:
+            if item[key] is not None and not isinstance(item[key], str):
+                raise ValueError('RELIC nullable relationship must be string or null')
+        if item['is_ecological'] is not None and type(item['is_ecological']) is not bool:
+            raise ValueError('RELIC source status must be boolean or null')
+    if expected['endpoint'] == 'seals':
+        import base64
+        for key in ['schema_name', 'schema_version', 'stored_digest', 'signature', 'seal_bytes_base64']:
+            if not isinstance(item[key], str) or not item[key]:
+                raise ValueError('RELIC missing stored seal evidence metadata')
+        base64.b64decode(item['seal_bytes_base64'], validate=True)
+link = self.next_url
+if link is not None:
+    if not isinstance(link, str) or not link:
+        raise ValueError('RELIC next_url must be null or a nonempty URL')
+    base, target = urlsplit(expected['base']), urlsplit(link)
+    query = parse_qs(target.query, keep_blank_values=True)
+    if (target.scheme, target.netloc) != (base.scheme, base.netloc) or target.username or target.password or target.fragment:
+        raise ValueError('RELIC unsafe pagination origin')
+    if target.path != base.path + '/v1/export/' + expected['endpoint']:
+        raise ValueError('RELIC pagination endpoint changed')
+    if query.get('checkpoint') != [expected['checkpoint']] or len(query.get('cursor', [])) != 1 or not query['cursor'][0]:
+        raise ValueError('RELIC pagination must retain checkpoint and cursor')
+del self._expected
+"

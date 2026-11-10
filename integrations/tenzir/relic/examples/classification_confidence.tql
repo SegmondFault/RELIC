@@ -1,0 +1,5 @@
+// Active assertions, including null confidence as unknown. Output exact confidence frequencies, not calibrated probabilities.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::classifications checkpoint=env("RELIC_CHECKPOINT")
+summarize assertions=count(), classification, confidence
+sort classification, confidence

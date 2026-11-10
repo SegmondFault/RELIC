@@ -110,6 +110,15 @@ and signature code is implemented and tested. FIDBF admission now has a client
 signer and PostgreSQL adapter; MMR service entry points remain fail closed until
 their database and key-custody adapters are implemented and reviewed.
 
+## Tenzir analytical integration
+
+The later-stage [Tenzir/TQL package](integrations/tenzir/relic/README.md) provides
+read-only analytical operators, deterministic fixtures, examples and reproducible
+Parquet export manifests. It targets a provisional checkpoint-pinned HTTP
+contract; the ordinary API is not built yet and live compatibility is unverified.
+PostgreSQL and the normal API remain authoritative. This integration does not
+change admission, signature, provenance or integrity rules.
+
 ## Contributing
 
 Create a branch for each change and submit it as a pull request into `main`.

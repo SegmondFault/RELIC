@@ -1,0 +1,64 @@
+[
+  {
+    "schema_version": "relic.seal/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-a",
+        "classification": null,
+        "is_ecological": false,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "seal-a",
+        "schema_name": "OCSF",
+        "schema_version": "1.6.0",
+        "stored_digest": "fixture-digest-not-a-verification",
+        "signature": "fixture-signature-not-valid",
+        "seal": {
+          "metadata": {
+            "version": "1.6.0"
+          },
+          "file": {
+            "name": "fixture",
+            "hashes": [
+              {
+                "algorithm_id": 3,
+                "value": "fixture"
+              }
+            ]
+          },
+          "actor": {
+            "process": {
+              "name": "fixture-builder"
+            }
+          },
+          "unmapped": {
+            "relic_extension": {
+              "recipe": [
+                "compile",
+                "link"
+              ],
+              "unknown": null
+            }
+          }
+        },
+        "seal_bytes_base64": "eyJtZXRhZGF0YSI6eyJ2ZXJzaW9uIjoiMS42LjAifSwiZmlsZSI6eyJuYW1lIjoiZml4dHVyZSIsImhhc2hlcyI6W3siYWxnb3JpdGhtX2lkIjozLCJ2YWx1ZSI6ImZpeHR1cmUifV19LCJhY3RvciI6eyJwcm9jZXNzIjp7Im5hbWUiOiJmaXh0dXJlLWJ1aWxkZXIifX0sInVubWFwcGVkIjp7InJlbGljX2V4dGVuc2lvbiI6eyJyZWNpcGUiOlsiY29tcGlsZSIsImxpbmsiXSwidW5rbm93biI6bnVsbH19fQ=="
+      }
+    ],
+    "next_url": "http://127.0.0.1:1/v1/export/seals?checkpoint=fixture-checkpoint&cursor=page-2&limit=1"
+  },
+  {
+    "schema_version": "relic.seal/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [],
+    "next_url": "http://127.0.0.1:1/v1/export/seals?checkpoint=fixture-checkpoint&cursor=page-3&limit=1"
+  },
+  {
+    "schema_version": "relic.seal/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [],
+    "next_url": null
+  }
+]

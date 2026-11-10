@@ -1,0 +1,5 @@
+// Active occurrences; nullable relationships retained. No labels inferred. Split train/test by binary or lineage before modelling to avoid leakage.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::functions checkpoint=env("RELIC_CHECKPOINT")
+select id, binary_id, source_id, batch_id, full_hash, specific_hash, compiler, architecture, is_ecological, fidbf_id, bsim_id, provenance_id
+relic::export_analysis output=env("RELIC_ANALYSIS_OUTPUT")

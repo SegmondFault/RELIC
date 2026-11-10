@@ -1,0 +1,46 @@
+[
+  {
+    "schema_version": "relic.classification/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-a",
+        "classification": "library",
+        "is_ecological": false,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "assertion-1",
+        "function_id": "function-1",
+        "confidence": 0.95
+      }
+    ],
+    "next_url": "http://127.0.0.1:1/v1/export/classifications?checkpoint=fixture-checkpoint&cursor=page-2&limit=1"
+  },
+  {
+    "schema_version": "relic.classification/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [],
+    "next_url": "http://127.0.0.1:1/v1/export/classifications?checkpoint=fixture-checkpoint&cursor=page-3&limit=1"
+  },
+  {
+    "schema_version": "relic.classification/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-a",
+        "classification": "library",
+        "is_ecological": false,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "assertion-2",
+        "function_id": "function-2",
+        "confidence": null
+      }
+    ],
+    "next_url": null
+  }
+]

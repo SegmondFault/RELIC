@@ -1,0 +1,5 @@
+// All active occurrences; true/false/null are separate populations; null is unknown.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::functions checkpoint=env("RELIC_CHECKPOINT")
+summarize functions=count(), is_ecological
+sort is_ecological

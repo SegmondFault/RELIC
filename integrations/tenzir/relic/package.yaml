@@ -1,0 +1,22 @@
+id: relic
+name: RELIC analytical exports
+author: RELIC contributors
+description: Read-only, checkpoint-pinned analytical streams from the RELIC HTTP API.
+categories: [sources]
+metadata:
+  api_status: provisional; fixture-tested, API implementation pending
+  tested_tenzir: 6.21.0
+inputs:
+  api_endpoint:
+    name: API endpoint
+    description: HTTPS API origin; no credentials, query or trailing slash.
+    default: https://relic.invalid
+  default_page_size:
+    name: Default page size
+    default: "500"
+  request_timeout:
+    name: Request timeout
+    default: 30s
+  maximum_retries:
+    name: Maximum retries
+    default: "3"

@@ -1,0 +1,33 @@
+Official package_add and operator loading: PASS
+binaries: pagination, empty intermediate page, exact records PASS
+bsim_memberships: pagination, empty intermediate page, exact records PASS
+classifications: pagination, empty intermediate page, exact records PASS
+functions: pagination, empty intermediate page, exact records PASS
+integrity: pagination, empty intermediate page, exact records PASS
+seals: pagination, empty intermediate page, exact records PASS
+Revocation default and false/null source filtering: PASS
+empty: PASS
+transient: PASS
+auth: rejected PASS
+permanent: rejected PASS
+checkpoint: rejected PASS
+schema: rejected PASS
+malformed: rejected PASS
+items: rejected PASS
+loop: rejected PASS
+duplicate: rejected PASS
+origin: rejected PASS
+link_checkpoint: rejected PASS
+late_checkpoint: rejected PASS
+late_schema: rejected PASS
+Malformed standard seal field diagnosed: PASS
+example bsim_fanout: PASS
+example classification_confidence: PASS
+example compiler_architecture_distribution: PASS
+example ecological_artificial_split: PASS
+example export_ml_dataset: PASS
+example hash_reuse: PASS
+example provenance_completeness: PASS
+Parquet roundtrip: PASS
+Atomic analysis manifest and digests: PASS
+Late failure publishes no output or manifest: PASS

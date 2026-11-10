@@ -1,0 +1,5 @@
+// Active functions with no linked seal; missing is not proof of invalid provenance. No join or inference about seal validity.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::functions checkpoint=env("RELIC_CHECKPOINT")
+where provenance_id == null
+select id, binary_id, provenance_id

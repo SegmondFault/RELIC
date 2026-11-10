@@ -1,0 +1,2 @@
+// API schema versions are checked in the private page reader.
+let $api_contract = "relic-export/1.0"

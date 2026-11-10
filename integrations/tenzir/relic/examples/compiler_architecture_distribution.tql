@@ -1,0 +1,5 @@
+// All active function occurrences; unknown compiler stays null. No deduplication.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::functions checkpoint=env("RELIC_CHECKPOINT")
+summarize functions=count(), compiler, architecture
+sort compiler, architecture

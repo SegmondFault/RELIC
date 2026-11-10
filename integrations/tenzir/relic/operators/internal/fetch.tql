@@ -1,0 +1,52 @@
+---
+args:
+  named:
+    - name: endpoint
+      type: string
+    - name: schema
+      type: string
+    - name: checkpoint
+      type: string
+    - name: cursor
+      type: string
+      default: null
+    - name: page_size
+      type: int
+      default: null
+---
+let $base = "{{ inputs.api_endpoint }}"
+let $size = $page_size if $page_size != null else {{ inputs.default_page_size }}
+let $url = f"{$base}/v1/export/{$endpoint}?checkpoint={encode_url($checkpoint)}&limit={$size}" + (f"&cursor={encode_url($cursor)}" if $cursor != null else "")
+strict {
+  from_http $url,
+    headers={Authorization: f"Bearer {secret("RELIC_API_TOKEN")}"},
+    timeout={{ inputs.request_timeout }},
+    max_retry_count={{ inputs.maximum_retries }},
+    paginate=(page => page.next_url) {
+    read_json raw=true
+    assert $checkpoint != null and $checkpoint != "", message="RELIC requires a checkpoint"
+    assert $size > 0 and $size <= 10000, message="RELIC page_size outside 1..10000"
+    relic::internal::page checkpoint=$checkpoint, schema=$schema, base=$base, endpoint=$endpoint
+  }
+  // Stateful validation must stay serial (the default). Never parallelize this UDO.
+  python "
+import sys
+if not hasattr(sys, '_relic_seen_links'):
+    sys._relic_seen_links = set()
+    sys._relic_seen_ids = set()
+seen_links = sys._relic_seen_links
+seen_ids = sys._relic_seen_ids
+link = self.next_url
+if link is not None:
+    if link in seen_links:
+        raise ValueError('RELIC pagination loop')
+    seen_links.add(link)
+for item in self['items']:
+    key = item['id']
+    if key in seen_ids:
+        raise ValueError('RELIC duplicate record across pages')
+    seen_ids.add(key)
+"
+  unroll items
+  this = items
+}

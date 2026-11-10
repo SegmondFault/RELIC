@@ -1,0 +1,90 @@
+[
+  {
+    "schema_version": "relic.function-fact/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-a",
+        "classification": null,
+        "is_ecological": false,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "function-1",
+        "bsim_id": "bsim-a",
+        "fidbf_id": "fidbf-a",
+        "full_hash": "full-reused",
+        "specific_hash": "specific-reused",
+        "compiler": "clang",
+        "architecture": "x86_64",
+        "provenance_id": "seal-a"
+      }
+    ],
+    "next_url": "http://127.0.0.1:1/v1/export/functions?checkpoint=fixture-checkpoint&cursor=page-2&limit=1"
+  },
+  {
+    "schema_version": "relic.function-fact/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [],
+    "next_url": "http://127.0.0.1:1/v1/export/functions?checkpoint=fixture-checkpoint&cursor=page-3&limit=1"
+  },
+  {
+    "schema_version": "relic.function-fact/1.0",
+    "checkpoint": "fixture-checkpoint",
+    "items": [
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-b",
+        "classification": null,
+        "is_ecological": true,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "function-2",
+        "bsim_id": "bsim-a",
+        "fidbf_id": null,
+        "full_hash": "full-reused",
+        "specific_hash": "specific-reused",
+        "compiler": "gcc",
+        "architecture": "aarch64",
+        "provenance_id": "seal-a"
+      },
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-c",
+        "classification": null,
+        "is_ecological": null,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": false,
+        "id": "function-3",
+        "bsim_id": null,
+        "fidbf_id": null,
+        "full_hash": "full-c",
+        "specific_hash": "specific-c",
+        "compiler": null,
+        "architecture": "x86_64",
+        "provenance_id": null
+      },
+      {
+        "source_id": "source-a",
+        "batch_id": "batch-a",
+        "binary_id": "binary-d",
+        "classification": null,
+        "is_ecological": false,
+        "created_at": "2026-01-01T00:00:00Z",
+        "revoked": true,
+        "id": "function-4",
+        "bsim_id": null,
+        "fidbf_id": "fidbf-d",
+        "full_hash": "full-d",
+        "specific_hash": "specific-d",
+        "compiler": "clang",
+        "architecture": "x86_64",
+        "provenance_id": "seal-a"
+      }
+    ],
+    "next_url": null
+  }
+]

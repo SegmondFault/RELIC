@@ -1,0 +1,68 @@
+---
+args:
+  named:
+    - name: checkpoint
+      type: string
+    - name: cursor
+      type: string
+      default: null
+    - name: page_size
+      type: int
+      default: null
+    - name: include_revoked
+      type: bool
+      default: false
+    - name: source_id
+      type: string
+      default: null
+    - name: batch_id
+      type: string
+      default: null
+    - name: binary_id
+      type: string
+      default: null
+    - name: classification
+      type: string
+      default: null
+    - name: is_ecological
+      type: bool
+      default: null
+    - name: created_after
+      type: time
+      default: null
+    - name: created_before
+      type: time
+      default: null
+---
+// Exactly one event per seal; no implicit joins.
+relic::internal::fetch endpoint="seals", schema="relic.seal/1.0",
+  checkpoint=$checkpoint, cursor=$cursor, page_size=$page_size
+where $include_revoked or revoked == false
+where $source_id == null or source_id == $source_id
+where $batch_id == null or batch_id == $batch_id
+where $binary_id == null or binary_id == $binary_id
+where $classification == null or classification == $classification
+where $is_ecological == null or is_ecological == $is_ecological
+where $created_after == null or time(created_at) >= $created_after
+where $created_before == null or time(created_at) < $created_before
+// Diagnostics are outside the signed seal; no custom extension validation is claimed.
+python "
+from collections.abc import Mapping
+seal = self.seal
+messages = []
+if not isinstance(seal, Mapping):
+    raise ValueError('RELIC seal must be a JSON object')
+for key in ['metadata', 'file', 'actor', 'process', 'record_integrity']:
+    if key in seal and seal[key] is not None and not isinstance(seal[key], Mapping):
+        messages.append('malformed standard object: '+key)
+if isinstance(seal.get('metadata'), Mapping):
+    version = seal['metadata'].get('version')
+    if version is not None and not isinstance(version, str):
+        messages.append('metadata.version must be a string')
+if isinstance(seal.get('file'), Mapping):
+    hashes = seal['file'].get('hashes')
+    if hashes is not None and not isinstance(hashes, list):
+        messages.append('file.hashes must be an array')
+self.seal_diagnostics = messages
+self.custom_extension_validated = False
+"

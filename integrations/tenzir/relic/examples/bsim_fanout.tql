@@ -1,0 +1,6 @@
+// Active BSim memberships, one count per distinct function/BSim pair. High-memory aggregation; functions without BSim are outside this population.
+// Pin RELIC_CHECKPOINT to an immutable API checkpoint. Fixture results are not scientific evidence.
+relic::bsim_memberships checkpoint=env("RELIC_CHECKPOINT")
+deduplicate bsim_id, function_id
+summarize occurrences=count(), bsim_id
+where occurrences > 1

@@ -1,0 +1,47 @@
+---
+args:
+  named:
+    - name: checkpoint
+      type: string
+    - name: cursor
+      type: string
+      default: null
+    - name: page_size
+      type: int
+      default: null
+    - name: include_revoked
+      type: bool
+      default: false
+    - name: source_id
+      type: string
+      default: null
+    - name: batch_id
+      type: string
+      default: null
+    - name: binary_id
+      type: string
+      default: null
+    - name: classification
+      type: string
+      default: null
+    - name: is_ecological
+      type: bool
+      default: null
+    - name: created_after
+      type: time
+      default: null
+    - name: created_before
+      type: time
+      default: null
+---
+// Exactly one event per binary; no implicit joins.
+relic::internal::fetch endpoint="binaries", schema="relic.binary/1.0",
+  checkpoint=$checkpoint, cursor=$cursor, page_size=$page_size
+where $include_revoked or revoked == false
+where $source_id == null or source_id == $source_id
+where $batch_id == null or batch_id == $batch_id
+where $binary_id == null or binary_id == $binary_id
+where $classification == null or classification == $classification
+where $is_ecological == null or is_ecological == $is_ecological
+where $created_after == null or time(created_at) >= $created_after
+where $created_before == null or time(created_at) < $created_before
