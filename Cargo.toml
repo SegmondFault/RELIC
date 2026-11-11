@@ -6,6 +6,7 @@ members = [
     "crates/relic-integrity-worker",
     "crates/relic-mmr-worker",
     "crates/relic-object-worker",
+    "experiments/relic-bloom-reference",
 ]
 resolver = "2"
 

@@ -1,0 +1,16 @@
+[package]
+name = "relic-bloom-reference"
+version = "0.0.0"
+description = "Synthetic reference model for the future RELIC Bloom-filter format"
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+relic-crypto = { path = "../../crates/relic-crypto" }
+thiserror = "2.0"
+
+[lints]
+workspace = true
