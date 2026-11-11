@@ -203,6 +203,15 @@ Proof generation and verification must state which checkpoint and leaf count
 they target. A later checkpoint may cover more leaves, but it must not change
 the meaning of an earlier signed checkpoint.
 
+## Derived Bloom-filter acceleration
+
+The planned [checkpoint-qualified Bloom-filter subsystem](bloom-filters.md) is
+a disposable read accelerator derived from an exact signed MMR checkpoint. It
+does not become an MMR leaf, change the chain, prove inclusion/non-inclusion or
+weaken authoritative confirmation. Its manifest binds the artifact to this
+checkpoint's identity, chain head and leaf count; mismatch or unavailability
+falls back to PostgreSQL.
+
 ## Decisions still open
 
 - Checkpoint cadence: every append, time-based, count-based or explicit batch.

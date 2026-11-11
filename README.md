@@ -110,6 +110,15 @@ and signature code is implemented and tested. FIDBF admission now has a client
 signer and PostgreSQL adapter; MMR service entry points remain fail closed until
 their database and key-custody adapters are implemented and reviewed.
 
+## Planned Bloom-filter acceleration
+
+The future [checkpoint-qualified Bloom-filter design](docs/bloom-filters.md)
+defines separate, domain-separated filters for exact binary, function, BSim,
+FIDBF and provenance identities. PostgreSQL remains authoritative: a verified
+negative applies only to the manifest's exact namespace and MMR checkpoint; a
+positive means possibly present and requires authoritative confirmation. The
+worker, registry and API are not implemented or production ready.
+
 ## Contributing
 
 Create a branch for each change and submit it as a pull request into `main`.

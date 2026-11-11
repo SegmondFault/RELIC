@@ -1,0 +1,20 @@
+{
+  "format": "relic-bloom-filter",
+  "format_version": 1,
+  "namespace": "binary-sha256",
+  "checkpoint_id": 42,
+  "integrity_chain_head": "1111111111111111111111111111111111111111111111111111111111111111",
+  "mmr_leaf_count": 1000,
+  "entry_count": 950,
+  "unique_value_count": 900,
+  "bit_count": 25880,
+  "hash_function_count": 20,
+  "target_false_positive_probability": "0.000001",
+  "hash_algorithm": "sha256-double-v1",
+  "domain": "relic-bloom-index-v1",
+  "payload_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "built_at": "2026-01-01T00:00:00.000000Z",
+  "builder_version": "0000000000000000000000000000000000000000",
+  "system_uid": "00000000-0000-0000-0000-000000000001",
+  "signature": "33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333"
+}

@@ -127,3 +127,13 @@ MMR construction is derived, asynchronous work: it consumes only committed
 integrity entries, and an MMR delay never permits an unhashed or unsigned
 authoritative row. A checkpoint is inserted atomically after its frontier has
 been independently reconstructed and signed.
+
+## Future Bloom-filter worker
+
+The planned [`relic-bloom-worker`](bloom-filters.md) is downstream of a verified
+MMR checkpoint and produces immutable, signed, content-addressed read
+accelerators. It never participates in admission, integrity sequencing or MMR
+construction. It uses a separate system identity and fails back to PostgreSQL
+if its exact namespace/checkpoint artifact cannot be verified. Its staged
+implementation gates are documented in
+[`bloom-filter-implementation-plan.md`](bloom-filter-implementation-plan.md).
