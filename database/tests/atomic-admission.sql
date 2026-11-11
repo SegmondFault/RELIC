@@ -67,6 +67,88 @@ $$;
 DO $$
 DECLARE
     analyst_id uuid := gen_random_uuid();
+    viewer_id uuid := gen_random_uuid();
+    source_id_value uuid := gen_random_uuid();
+    assertion_id uuid := gen_random_uuid();
+    rejected boolean;
+BEGIN
+    INSERT INTO user_public (user_id, public_key, role, owner_type)
+    VALUES
+        (analyst_id, '\x31', 'analyst', 'human'),
+        (viewer_id, '\x32', 'viewer', 'human');
+
+    INSERT INTO source (
+        source_id, name, source_type, retrieved_at,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        source_id_value, 'licensing-source', 'source archive',
+        clock_timestamp(), analyst_id, '\x33'
+    );
+
+    INSERT INTO license_assertion (
+        license_assertion_id, source_id, spdx_expression, basis,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        assertion_id, source_id_value, 'MIT OR Apache-2.0', 'declared',
+        analyst_id, '\x34'
+    );
+
+    IF NOT target_exists('license_assertion', assertion_id) THEN
+        RAISE EXCEPTION 'licence assertion is not available to revocation targets';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        UPDATE license_assertion
+           SET spdx_expression = 'MIT'
+         WHERE license_assertion_id = assertion_id;
+    EXCEPTION
+        WHEN integrity_constraint_violation THEN
+            rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'licence assertion mutation was not rejected';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO license_assertion (
+            source_id, binary_id, spdx_expression, basis,
+            submitted_by_analyst_id, signature
+        ) VALUES (
+            source_id_value, gen_random_uuid(), 'MIT', 'detected',
+            analyst_id, '\x35'
+        );
+    EXCEPTION
+        WHEN check_violation OR foreign_key_violation THEN
+            rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'multi-target licence assertion was not rejected';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO license_assertion (
+            source_id, spdx_expression, basis,
+            submitted_by_analyst_id, signature
+        ) VALUES (
+            source_id_value, 'NOASSERTION', 'analyst_assessed',
+            viewer_id, '\x36'
+        );
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'viewer licensing submission was not rejected';
+    END IF;
+END;
+$$;
+
+DO $$
+DECLARE
+    analyst_id uuid := gen_random_uuid();
     integrity_system_id uuid := gen_random_uuid();
     mmr_system_id uuid := gen_random_uuid();
     source_id_value uuid := gen_random_uuid();

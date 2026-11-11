@@ -34,6 +34,7 @@ RELIC brings together:
 - signed submissions and moderation actions;
 - reproducibility evidence;
 - supporting machine-learning results.
+- signed, evidence-backed Source and Binary licensing assertions.
 
 ## Current status
 
@@ -68,6 +69,10 @@ public API.
 
 The ecological/artificial distinction and the recommended cell-seal JSON fields
 are documented in [`docs/provenance.md`](docs/provenance.md).
+
+Optional SPDX licensing assertions are documented in
+[`docs/licensing.md`](docs/licensing.md). They are additive and do not require
+existing Sources, Binaries or signed Batches to be rewritten.
 
 ## Repository structure
 
@@ -140,8 +145,8 @@ The server updater fetches and fast-forwards the shared checkout at `/srv/relic`
 
 Database changes are deliberately applied separately. After updating the
 checkout, run `scripts/apply-database-migrations.sh` as root. It installs the
-MMR checkpoint and BSim membership changes once, preserving existing BSim
-objects and associations, and safely reports changes already present.
+MMR checkpoint, BSim membership and optional licensing-assertion changes once,
+preserving existing records and safely reporting changes already present.
 
 ## Licence
 

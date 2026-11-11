@@ -12,11 +12,13 @@ database_name="${RELIC_DATABASE:-relic}"
 mmr_migration="$relic_dir/database/migrations/002-mmr-checkpoints.sql"
 bsim_migration="$relic_dir/database/migrations/003-bsim-membership.sql"
 mmr_uniqueness_migration="$relic_dir/database/migrations/004-mmr-leaf-count-uniqueness.sql"
+license_assertion_migration="$relic_dir/database/migrations/005-license-assertions.sql"
 
 for migration_file in \
     "$mmr_migration" \
     "$bsim_migration" \
-    "$mmr_uniqueness_migration"; do
+    "$mmr_uniqueness_migration" \
+    "$license_assertion_migration"; do
     if [[ ! -f "$migration_file" ]]; then
         echo "Migration file not found: $migration_file" >&2
         exit 1
@@ -88,4 +90,20 @@ else
         -f "$mmr_uniqueness_migration"
 
     echo "Installed MMR leaf-count uniqueness."
+fi
+
+license_assertions_installed="$(
+    runuser -u postgres -- psql --no-psqlrc -X -d "$database_name" -Atqc \
+        "SELECT CASE WHEN to_regclass('catalogue.license_assertion') IS NULL THEN 0 ELSE 1 END"
+)"
+
+if [[ "$license_assertions_installed" == "1" ]]; then
+    echo "Licence assertions are already installed."
+else
+    runuser -u postgres -- psql --no-psqlrc -X \
+        -v ON_ERROR_STOP=1 \
+        -d "$database_name" \
+        -f "$license_assertion_migration"
+
+    echo "Installed catalogue.license_assertion."
 fi

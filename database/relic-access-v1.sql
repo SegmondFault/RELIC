@@ -22,6 +22,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue
 -- Checkpoints are append-only evidence even though the general application
 -- policy permits updates to ordinary catalogue tables.
 REVOKE UPDATE ON catalogue.mmr_checkpoint FROM relic_app;
+REVOKE UPDATE, DELETE ON catalogue.license_assertion FROM relic_app;
 
 RESET ROLE;
 
