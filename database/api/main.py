@@ -6,6 +6,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query
 
 app = FastAPI(title="RELIC API", version="0.1.0")
 
+"""TODO: Put each router & its endpoints in separate file. See docs for endpoint details."""
 
 def todo() -> None:
     raise HTTPException(status_code=501, detail="Not implemented yet, come back later")
@@ -32,7 +33,6 @@ catalogue = APIRouter(tags=["catalogue"])
 
 @catalogue.get("/users")
 async def list_users(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    """Public identity only (user_public); user_private is never exposed."""
     todo()
 
 @catalogue.get("/users/{user_id}")
@@ -65,7 +65,6 @@ async def get_binary(binary_id: UUID):
 
 @catalogue.get("/functions")
 async def list_functions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    """Core lookup, e.g. ?full_hash=...&specific_hash=... (will require a filter)."""
     todo()
 
 @catalogue.get("/functions/{function_id}")
@@ -82,7 +81,6 @@ async def get_fidbf(fidbf_id: UUID):
 
 @catalogue.get("/fidbf/{fidbf_id}/download")
 async def download_fidbf(fidbf_id: UUID):
-    """Stream the FIDBF object from object storage."""
     todo()
 
 @catalogue.get("/bsim")
