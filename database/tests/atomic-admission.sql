@@ -372,5 +372,122 @@ BEGIN
 END;
 $$;
 
+DO $$
+DECLARE
+    analyst_id uuid := gen_random_uuid();
+    source_id_value uuid := gen_random_uuid();
+    batch_id_value uuid := gen_random_uuid();
+    binary_id_value uuid := gen_random_uuid();
+    function_id_value uuid := gen_random_uuid();
+    composition_id_value uuid := gen_random_uuid();
+    rejected boolean;
+BEGIN
+    INSERT INTO user_public (user_id, public_key, role, owner_type)
+    VALUES (analyst_id, '\x51', 'analyst', 'human');
+
+    INSERT INTO source (
+        source_id, name, source_type, retrieved_at,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        source_id_value, 'composition-test', 'analysis', clock_timestamp(),
+        analyst_id, '\x52'
+    );
+    INSERT INTO batch (
+        batch_id, md5, content_sha256, analyst_user_id, signature
+    ) VALUES (
+        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, '\x53'
+    );
+    INSERT INTO binary_record (
+        binary_id, batch_id, content_sha256, content_md5, size_bytes,
+        created_by, source_id
+    ) VALUES (
+        binary_id_value, batch_id_value, repeat('3', 64), repeat('4', 32), 1,
+        analyst_id, source_id_value
+    );
+    INSERT INTO function_record (
+        function_id, binary_id, full_hash, specific_hash
+    ) VALUES (
+        function_id_value, binary_id_value, 'composition-full',
+        'composition-specific'
+    );
+
+    INSERT INTO behavioural_composition (
+        behavioural_composition_id, name, description,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        composition_id_value, 'staged execution chain',
+        'Neutral members whose ordered combination is classified separately',
+        analyst_id, '\x54'
+    );
+    INSERT INTO composition_member (
+        behavioural_composition_id, target_type, target_id,
+        member_role, sequence_number
+    ) VALUES
+        (composition_id_value, 'binary', binary_id_value, 'loader', 0),
+        (composition_id_value, 'function', function_id_value, 'payload', 1);
+
+    INSERT INTO classification (
+        target_type, target_id, label, confidence, analyst_id,
+        evidence, signature
+    ) VALUES (
+        'behavioural_composition', composition_id_value, 'malicious', 0.9000,
+        analyst_id, '{"reason":"combined execution behaviour"}', '\x55'
+    );
+
+    IF NOT target_exists('behavioural_composition', composition_id_value) THEN
+        RAISE EXCEPTION 'behavioural composition is unavailable to polymorphic targets';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM classification
+         WHERE target_type IN ('binary', 'function')
+           AND target_id IN (binary_id_value, function_id_value)
+    ) THEN
+        RAISE EXCEPTION 'composition classification propagated to a member';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO composition_member (
+            behavioural_composition_id, target_type, target_id,
+            member_role, sequence_number
+        ) VALUES (
+            composition_id_value, 'function', function_id_value,
+            'late-member', 2
+        );
+    EXCEPTION
+        WHEN integrity_constraint_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'classified composition accepted a late member';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        UPDATE behavioural_composition SET name = 'rewritten'
+         WHERE behavioural_composition_id = composition_id_value;
+    EXCEPTION
+        WHEN integrity_constraint_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'behavioural composition mutation was not rejected';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO classification (
+            target_type, target_id, label, analyst_id, signature
+        ) VALUES (
+            'behavioural_composition', gen_random_uuid(), 'malicious',
+            analyst_id, '\x56'
+        );
+    EXCEPTION
+        WHEN foreign_key_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'classification accepted a missing behavioural composition';
+    END IF;
+END;
+$$;
+
 RESET ROLE;
 ROLLBACK;

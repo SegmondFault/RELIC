@@ -77,6 +77,10 @@ existing Sources, Binaries or signed Batches to be rewritten.
 The additive Binary/library distinction and signed component claims are
 documented in [`docs/software-components.md`](docs/software-components.md).
 
+Emergent behaviour that belongs to a combination rather than one Function or
+Binary is represented by optional behavioural compositions, documented in
+[`docs/behavioural-compositions.md`](docs/behavioural-compositions.md).
+
 ## Repository structure
 
 ```text
@@ -149,8 +153,8 @@ The server updater fetches and fast-forwards the shared checkout at `/srv/relic`
 Database changes are deliberately applied separately. After updating the
 checkout, run `scripts/apply-database-migrations.sh` as root. It installs the
 MMR checkpoint, BSim membership, licensing, inline OCSF provenance and
-software-component changes once, preserving existing records and safely
-reporting changes already present.
+software-component and behavioural-composition changes once, preserving
+existing records and safely reporting changes already present.
 
 ## Licence
 

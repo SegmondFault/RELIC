@@ -14,13 +14,15 @@ bsim_migration="$relic_dir/database/migrations/003-bsim-membership.sql"
 mmr_uniqueness_migration="$relic_dir/database/migrations/004-mmr-leaf-count-uniqueness.sql"
 license_assertion_migration="$relic_dir/database/migrations/005-license-assertions.sql"
 ocsf_component_migration="$relic_dir/database/migrations/006-ocsf-provenance-and-software-components.sql"
+behavioural_composition_migration="$relic_dir/database/migrations/007-behavioural-compositions.sql"
 
 for migration_file in \
     "$mmr_migration" \
     "$bsim_migration" \
     "$mmr_uniqueness_migration" \
     "$license_assertion_migration" \
-    "$ocsf_component_migration"; do
+    "$ocsf_component_migration" \
+    "$behavioural_composition_migration"; do
     if [[ ! -f "$migration_file" ]]; then
         echo "Migration file not found: $migration_file" >&2
         exit 1
@@ -134,4 +136,23 @@ else
         -f "$ocsf_component_migration"
 
     echo "Installed inline OCSF provenance and software-component assertions."
+fi
+
+behavioural_compositions_installed="$(
+    runuser -u postgres -- psql --no-psqlrc -X -d "$database_name" -Atqc \
+        "SELECT CASE WHEN
+            to_regclass('catalogue.behavioural_composition') IS NOT NULL
+            AND to_regclass('catalogue.composition_member') IS NOT NULL
+        THEN 1 ELSE 0 END"
+)"
+
+if [[ "$behavioural_compositions_installed" == "1" ]]; then
+    echo "Behavioural compositions are already installed."
+else
+    runuser -u postgres -- psql --no-psqlrc -X \
+        -v ON_ERROR_STOP=1 \
+        -d "$database_name" \
+        -f "$behavioural_composition_migration"
+
+    echo "Installed behavioural compositions and classification target support."
 fi

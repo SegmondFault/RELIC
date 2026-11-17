@@ -116,6 +116,14 @@ relationship, basis, confidence, optional evidence-provenance ID and analyst
 identity. A component row without an assertion does not establish that a Binary
 contains that software.
 
+Behavioural compositions follow the same signed, atomic admission boundary.
+The API creates the composition, every Binary/Function member, and its signed
+classification in one transaction. The classification applies only to the
+composition: it must not be copied to individual members. Members must precede
+the classification because a classified composition cannot later gain members;
+a changed member set is a new composition followed by ordinary revocation of
+the superseded assertion.
+
 ## Atomic admission
 
 One FIDBF admission is one atomic unit:

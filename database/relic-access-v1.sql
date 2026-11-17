@@ -26,6 +26,8 @@ REVOKE UPDATE, DELETE ON catalogue.license_assertion FROM relic_app;
 REVOKE UPDATE, DELETE ON catalogue.software_component,
     catalogue.software_release,
     catalogue.binary_component_assertion FROM relic_app;
+REVOKE UPDATE, DELETE ON catalogue.behavioural_composition,
+    catalogue.composition_member FROM relic_app;
 
 RESET ROLE;
 
