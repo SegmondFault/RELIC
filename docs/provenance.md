@@ -3,9 +3,10 @@
 RELIC deliberately keeps **source** and **provenance** separate.
 
 - A `catalogue.source` row records where a submitted object or binary came from.
-- A `catalogue.provenance` row points at an inspectable JSON cell seal that records
-  how an object or binary was produced and how another analyst can inspect or
-  reproduce it.
+- A `catalogue.provenance` row stores an inspectable OCSF-style JSON cell seal in
+  `object_data` and records how an object or binary was produced and how another
+  analyst can inspect or reproduce it. `storage_path` remains nullable for legacy
+  or externally retained objects.
 
 This distinction is sufficient to record both artificial analysis builds and
 material obtained elsewhere. It does not require another table or mandatory
@@ -29,45 +30,79 @@ artificial build may use `FIDBF-gen local build` as its source name or reference
 An ecological source may instead cite a collection, publication, vendor archive,
 or acquisition note.
 
-## Cell-seal JSON
+## OCSF-style cell-seal JSON
 
-The provenance object uses the schema selected by the submitting analyst through
-`schema_name` and `schema_version`. RELIC does not impose one universal JSON
-layout. The following fields are a recommended semantic convention when they are
-useful:
+New seals use `schema_name = 'ocsf'` and identify the OCSF version in both
+`schema_version` and `metadata.version`. RELIC uses the OCSF base-event envelope
+and keeps project-specific reproducibility material below `unmapped.relic`.
+This makes the object directly inspectable and TQL-friendly without pretending
+that build recipes are a new OCSF core event class.
+
+The minimum RELIC contract is:
+
+- an OCSF `class_uid`, `category_uid`, `activity_id`, derived `type_uid`, `time`,
+  `severity_id` and `metadata` envelope;
+- `metadata.version` naming the OCSF release used by the producer;
+- `metadata.product.name = "RELIC"`;
+- `unmapped.relic.schema_version = "relic.provenance/1.0"`; and
+- the reproducibility recipe and evidence below `unmapped.relic`.
+
+For software/build evidence, prefer the OCSF Software Inventory Info class and
+its SBOM/software-component objects when the supplied facts map cleanly. Fields
+without a lossless OCSF mapping remain in `unmapped.relic`; do not invent values.
+
+Example:
 
 ```json
 {
-  "origin": {
-    "method": "built_locally",
-    "machine": "analysis-workstation"
+  "class_uid": 5020,
+  "category_uid": 5,
+  "activity_id": 2,
+  "type_uid": 502002,
+  "time": 1794900000000,
+  "severity_id": 1,
+  "metadata": {
+    "version": "1.9.0",
+    "product": {"name": "RELIC", "vendor_name": "RELIC"}
   },
-  "source_code": {
-    "availability": "available",
-    "url": "https://example.org/project/source",
-    "revision": "v1.2.3"
-  },
-  "build": {
-    "tool": "fidbf-gen",
-    "compiler": "clang 18.1.8",
-    "flags": ["-O2"],
-    "recipe": "build-release"
+  "device": {"uid": "analysis-workstation"},
+  "unmapped": {
+    "relic": {
+      "schema_version": "relic.provenance/1.0",
+      "origin": {
+        "method": "built_locally",
+        "machine": "analysis-workstation"
+      },
+      "source_code": {
+        "availability": "available",
+        "url": "https://example.org/project/source",
+        "revision": "v1.2.3"
+      },
+      "build": {
+        "tool": "fidbf-gen",
+        "compiler": "clang 18.1.8",
+        "flags": ["-O2"],
+        "recipe": "build-release"
+      }
+    }
   }
 }
 ```
 
-`origin.method` may use values such as `built_locally`, `downloaded`, `received`,
+`unmapped.relic.origin.method` may use values such as `built_locally`, `downloaded`, `received`,
 or another value defined by the selected schema. Machine labels should be useful
 for reproduction without exposing secrets or personal information.
 
-`source_code.availability` should be one of `available`, `partial`, `unavailable`,
+`unmapped.relic.source_code.availability` should be one of `available`, `partial`, `unavailable`,
 or `unknown` when that distinction is recorded. `url` and `revision` identify the
 code actually used; they are not assertions about authorship or ownership.
 
-For material acquired elsewhere, a minimal cell seal might instead be:
+For material acquired elsewhere, use the same base envelope and replace its
+`unmapped.relic` value with, for example:
 
 ```json
-{
+"relic": {
+  "schema_version": "relic.provenance/1.0",
   "origin": {
     "method": "downloaded",
     "reference": "Malware collection snapshot 2026-10"
@@ -91,6 +126,10 @@ correction may be expressed by the analyst's chosen JSON schema until RELIC has 
 demonstrated need for a database-level relationship.
 
 ## Examples
+
+Digests are calculated over the agreed canonical JSON serialization, not the
+PostgreSQL `jsonb` physical representation. `sha256` is the security digest;
+`md5` is retained only for compatibility.
 
 An artificial analysis build made on an analyst machine should normally have:
 

@@ -8,7 +8,17 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-uuid-1"] }
 relic-crypto = { path = "../relic-crypto" }
+thiserror = "2.0"
+uuid = { version = "1.18", features = ["serde", "v4"] }
+zeroize = "1.8"
+
+[[bin]]
+name = "relic-chain-bsim"
+path = "src/bin/chain-bsim.rs"
 
 [lints]
 workspace = true

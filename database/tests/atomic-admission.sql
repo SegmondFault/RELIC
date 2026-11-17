@@ -272,5 +272,105 @@ BEGIN
 END;
 $$;
 
+DO $$
+DECLARE
+    analyst_id uuid := gen_random_uuid();
+    source_id_value uuid := gen_random_uuid();
+    batch_id_value uuid := gen_random_uuid();
+    binary_id_value uuid := gen_random_uuid();
+    provenance_id_value uuid := gen_random_uuid();
+    component_id_value uuid := gen_random_uuid();
+    release_id_value uuid := gen_random_uuid();
+    assertion_id_value uuid := gen_random_uuid();
+    rejected boolean;
+BEGIN
+    INSERT INTO user_public (user_id, public_key, role, owner_type)
+    VALUES (analyst_id, '\x41', 'analyst', 'human');
+
+    INSERT INTO source (
+        source_id, name, source_type, retrieved_at, is_ecological,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        source_id_value, 'component-test', 'BSIM', clock_timestamp(), false,
+        analyst_id, '\x42'
+    );
+    INSERT INTO batch (
+        batch_id, md5, content_sha256, analyst_user_id, signature
+    ) VALUES (
+        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, '\x43'
+    );
+    INSERT INTO binary_record (
+        binary_id, batch_id, content_sha256, content_md5, size_bytes,
+        created_by, source_id
+    ) VALUES (
+        binary_id_value, batch_id_value, repeat('3', 64), repeat('4', 32), 1,
+        analyst_id, source_id_value
+    );
+
+    INSERT INTO provenance (
+        provenance_id, binary_id, schema_name, schema_version, object_data,
+        sha256, md5, submitted_by_user_id, signature, source_id
+    ) VALUES (
+        provenance_id_value, binary_id_value, 'ocsf', '1.9.0',
+        '{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}',
+        repeat('5', 64), repeat('6', 32), analyst_id, '\x44', source_id_value
+    );
+
+    INSERT INTO software_component (
+        component_id, name, component_kind, purl, created_by_analyst_id
+    ) VALUES (
+        component_id_value, 'libexample', 'library',
+        'pkg:generic/libexample@1.0', analyst_id
+    );
+    INSERT INTO software_release (
+        software_release_id, component_id, version, source_id,
+        created_by_analyst_id
+    ) VALUES (
+        release_id_value, component_id_value, '1.0', source_id_value, analyst_id
+    );
+    INSERT INTO binary_component_assertion (
+        binary_component_assertion_id, binary_id, software_release_id,
+        relationship, basis, confidence, evidence_provenance_id,
+        submitted_by_analyst_id, signature
+    ) VALUES (
+        assertion_id_value, binary_id_value, release_id_value,
+        'statically_contains', 'detected', 0.8750, provenance_id_value,
+        analyst_id, '\x45'
+    );
+
+    IF NOT target_exists('binary_component_assertion', assertion_id_value) THEN
+        RAISE EXCEPTION 'component assertion is unavailable to revocation targets';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        UPDATE binary_component_assertion SET confidence = 1
+         WHERE binary_component_assertion_id = assertion_id_value;
+    EXCEPTION
+        WHEN integrity_constraint_violation THEN
+            rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'component assertion mutation was not rejected';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO provenance (
+            binary_id, schema_name, schema_version, sha256, md5,
+            submitted_by_user_id, signature, source_id
+        ) VALUES (
+            binary_id_value, 'ocsf', '1.9.0', repeat('7', 64), repeat('8', 32),
+            analyst_id, '\x46', source_id_value
+        );
+    EXCEPTION
+        WHEN check_violation THEN rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'pathless and objectless provenance was accepted';
+    END IF;
+END;
+$$;
+
 RESET ROLE;
 ROLLBACK;

@@ -1304,7 +1304,13 @@ dependencies = [
 name = "relic-integrity-worker"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "clap",
+ "postgres",
  "relic-crypto",
+ "thiserror",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

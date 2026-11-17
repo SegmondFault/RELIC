@@ -102,6 +102,20 @@ Required negative acceptance tests for every signed route are:
 - an unknown, revoked or incorrectly-role-scoped identity fails; and
 - every failure leaves the authoritative and integrity tables unchanged.
 
+New provenance submissions store their OCSF-style seal directly in
+`catalogue.provenance.object_data`. The API must require an object-valued JSON
+document, preserve the submitted OCSF version, and verify SHA-256 plus the
+compatibility MD5 against the agreed canonical JSON serialization before
+admission. RELIC-specific build recipe fields remain below `unmapped.relic`;
+the API must not silently discard unmapped evidence.
+
+Binary/component claims use the same signed-write rule. Creating a new
+component or release and its `binary_component_assertion` is one transaction;
+the signed canonical claim covers the Binary ID, component/release identity,
+relationship, basis, confidence, optional evidence-provenance ID and analyst
+identity. A component row without an assertion does not establish that a Binary
+contains that software.
+
 ## Atomic admission
 
 One FIDBF admission is one atomic unit:

@@ -23,6 +23,9 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue
 -- policy permits updates to ordinary catalogue tables.
 REVOKE UPDATE ON catalogue.mmr_checkpoint FROM relic_app;
 REVOKE UPDATE, DELETE ON catalogue.license_assertion FROM relic_app;
+REVOKE UPDATE, DELETE ON catalogue.software_component,
+    catalogue.software_release,
+    catalogue.binary_component_assertion FROM relic_app;
 
 RESET ROLE;
 

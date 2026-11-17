@@ -46,6 +46,9 @@ CREATE TYPE corpus_target_type AS ENUM (
     'bsim',
     'provenance',
     'license_assertion',
+    'software_component',
+    'software_release',
+    'binary_component_assertion',
     'classification',
     'flag'
 );
@@ -55,6 +58,21 @@ CREATE TYPE license_assertion_basis AS ENUM (
     'detected',
     'inferred',
     'analyst_assessed'
+);
+
+CREATE TYPE component_assertion_basis AS ENUM (
+    'declared',
+    'detected',
+    'inferred',
+    'analyst_assessed'
+);
+
+CREATE TYPE binary_component_relationship AS ENUM (
+    'build_of',
+    'statically_contains',
+    'dynamically_links',
+    'derived_from',
+    'other'
 );
 
 CREATE TYPE revocation_decision AS ENUM (
@@ -241,7 +259,8 @@ CREATE TABLE provenance (
     binary_id uuid REFERENCES binary_record(binary_id) ON DELETE RESTRICT,
     schema_name text,
     schema_version text,
-    storage_path text NOT NULL CHECK (btrim(storage_path) <> ''),
+    storage_path text CHECK (storage_path IS NULL OR btrim(storage_path) <> ''),
+    object_data jsonb,
     sha256 sha256_hex NOT NULL,
     md5 md5_hex NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -250,11 +269,17 @@ CREATE TABLE provenance (
     signature bytea NOT NULL CHECK (octet_length(signature) > 0),
     source_id uuid NOT NULL
         REFERENCES source(source_id) ON DELETE RESTRICT,
-    CHECK (num_nonnulls(fidbf_id, bsim_id, binary_id) >= 1)
+    CHECK (num_nonnulls(fidbf_id, bsim_id, binary_id) >= 1),
+    CHECK (num_nonnulls(storage_path, object_data) >= 1),
+    CHECK (object_data IS NULL OR jsonb_typeof(object_data) = 'object')
 );
 
 COMMENT ON TABLE provenance IS
-    'Path and digests for user-schema provenance JSON used for external reproducibility verification.';
+    'Inspectably stored OCSF-style provenance JSON, or a legacy external path, used for reproducibility verification.';
+COMMENT ON COLUMN provenance.object_data IS
+    'Preferred inline OCSF-style JSON seal. RELIC-specific recipe and evidence fields belong below unmapped.relic.';
+COMMENT ON COLUMN provenance.storage_path IS
+    'Optional legacy/external object path. New inline seals need not use a path.';
 
 CREATE TABLE license_assertion (
     license_assertion_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -279,6 +304,55 @@ COMMENT ON COLUMN license_assertion.spdx_expression IS
     'SPDX license expression, NONE or NOASSERTION. Full SPDX validation is performed by the application before admission.';
 COMMENT ON COLUMN license_assertion.evidence_provenance_id IS
     'Optional supporting cell-seal/provenance object; scanner and SPDX-list versions belong in that inspectable evidence.';
+
+CREATE TABLE software_component (
+    component_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name text NOT NULL CHECK (btrim(name) <> ''),
+    component_kind text NOT NULL CHECK (btrim(component_kind) <> ''),
+    namespace text,
+    purl text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_by_analyst_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT
+);
+
+COMMENT ON TABLE software_component IS
+    'Immutable normalized identity such as a library, application or runtime. It is not itself a claim that a Binary contains the component.';
+
+CREATE TABLE software_release (
+    software_release_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id uuid NOT NULL
+        REFERENCES software_component(component_id) ON DELETE RESTRICT,
+    version text,
+    source_id uuid REFERENCES source(source_id) ON DELETE RESTRICT,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_by_analyst_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT
+);
+
+COMMENT ON TABLE software_release IS
+    'Immutable release/version identity for a Software Component. Version and Source may be NULL when genuinely unknown.';
+
+CREATE TABLE binary_component_assertion (
+    binary_component_assertion_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    binary_id uuid NOT NULL
+        REFERENCES binary_record(binary_id) ON DELETE RESTRICT,
+    software_release_id uuid NOT NULL
+        REFERENCES software_release(software_release_id) ON DELETE RESTRICT,
+    relationship binary_component_relationship NOT NULL,
+    basis component_assertion_basis NOT NULL,
+    confidence numeric(5, 4)
+        CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+    evidence_provenance_id uuid
+        REFERENCES provenance(provenance_id) ON DELETE RESTRICT,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    submitted_by_analyst_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    signature bytea NOT NULL CHECK (octet_length(signature) > 0)
+);
+
+COMMENT ON TABLE binary_component_assertion IS
+    'Append-only signed claim linking a concrete Binary to a normalized software release. Corrections are new assertions plus revocation.';
 
 CREATE TABLE revocation (
     revocation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -422,12 +496,24 @@ CREATE INDEX provenance_fidbf_id_idx ON provenance(fidbf_id);
 CREATE INDEX provenance_bsim_id_idx ON provenance(bsim_id);
 CREATE INDEX provenance_binary_id_idx ON provenance(binary_id);
 CREATE INDEX provenance_source_id_idx ON provenance(source_id);
+CREATE INDEX provenance_object_data_gin_idx ON provenance USING gin(object_data)
+    WHERE object_data IS NOT NULL;
 CREATE INDEX license_assertion_source_id_idx ON license_assertion(source_id)
     WHERE source_id IS NOT NULL;
 CREATE INDEX license_assertion_binary_id_idx ON license_assertion(binary_id)
     WHERE binary_id IS NOT NULL;
 CREATE INDEX license_assertion_evidence_idx
     ON license_assertion(evidence_provenance_id)
+    WHERE evidence_provenance_id IS NOT NULL;
+CREATE INDEX software_release_component_idx ON software_release(component_id);
+CREATE INDEX software_release_source_idx ON software_release(source_id)
+    WHERE source_id IS NOT NULL;
+CREATE INDEX binary_component_assertion_binary_idx
+    ON binary_component_assertion(binary_id);
+CREATE INDEX binary_component_assertion_release_idx
+    ON binary_component_assertion(software_release_id);
+CREATE INDEX binary_component_assertion_evidence_idx
+    ON binary_component_assertion(evidence_provenance_id)
     WHERE evidence_provenance_id IS NOT NULL;
 CREATE INDEX revocation_target_idx ON revocation(target_type, target_id);
 CREATE INDEX revocation_account_state_idx
@@ -636,6 +722,17 @@ BEGIN
             SELECT 1 FROM license_assertion
              WHERE license_assertion_id = candidate_id
         )
+        WHEN 'software_component' THEN EXISTS (
+            SELECT 1 FROM software_component WHERE component_id = candidate_id
+        )
+        WHEN 'software_release' THEN EXISTS (
+            SELECT 1 FROM software_release
+             WHERE software_release_id = candidate_id
+        )
+        WHEN 'binary_component_assertion' THEN EXISTS (
+            SELECT 1 FROM binary_component_assertion
+             WHERE binary_component_assertion_id = candidate_id
+        )
         WHEN 'classification' THEN EXISTS (
             SELECT 1 FROM classification WHERE classification_id = candidate_id
         )
@@ -814,6 +911,16 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION reject_component_model_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'Software component evidence is immutable; append a replacement and revoke the superseded assertion'
+        USING ERRCODE = 'integrity_constraint_violation';
+END;
+$$;
+
 CREATE TRIGGER source_requires_analyst
 BEFORE INSERT OR UPDATE ON source
 FOR EACH ROW EXECUTE FUNCTION require_actor_role(
@@ -853,6 +960,36 @@ FOR EACH ROW EXECUTE FUNCTION require_actor_role(
 CREATE TRIGGER license_assertion_is_immutable
 BEFORE UPDATE OR DELETE ON license_assertion
 FOR EACH ROW EXECUTE FUNCTION reject_license_assertion_change();
+
+CREATE TRIGGER software_component_requires_analyst
+BEFORE INSERT ON software_component
+FOR EACH ROW EXECUTE FUNCTION require_actor_role(
+    'created_by_analyst_id', 'analyst'
+);
+
+CREATE TRIGGER software_release_requires_analyst
+BEFORE INSERT ON software_release
+FOR EACH ROW EXECUTE FUNCTION require_actor_role(
+    'created_by_analyst_id', 'analyst'
+);
+
+CREATE TRIGGER binary_component_assertion_requires_analyst
+BEFORE INSERT ON binary_component_assertion
+FOR EACH ROW EXECUTE FUNCTION require_actor_role(
+    'submitted_by_analyst_id', 'analyst'
+);
+
+CREATE TRIGGER software_component_is_immutable
+BEFORE UPDATE OR DELETE ON software_component
+FOR EACH ROW EXECUTE FUNCTION reject_component_model_change();
+
+CREATE TRIGGER software_release_is_immutable
+BEFORE UPDATE OR DELETE ON software_release
+FOR EACH ROW EXECUTE FUNCTION reject_component_model_change();
+
+CREATE TRIGGER binary_component_assertion_is_immutable
+BEFORE UPDATE OR DELETE ON binary_component_assertion
+FOR EACH ROW EXECUTE FUNCTION reject_component_model_change();
 
 CREATE TRIGGER revocation_actor_rules
 BEFORE INSERT OR UPDATE ON revocation

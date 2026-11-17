@@ -64,7 +64,7 @@ public API.
 - Independently submitted objects and moderation actions carry their own signatures.
 - Sources and provenance are recorded separately.
 - FIDBF and BSim data may be absent.
-- Provenance supports external reproduction without imposing one universal provenance format.
+- Provenance stores OCSF-style JSON seals while retaining `unmapped.relic` for lossless build recipes and evidence.
 - Uncertainty and missing evidence must remain visible.
 
 The ecological/artificial distinction and the recommended cell-seal JSON fields
@@ -73,6 +73,9 @@ are documented in [`docs/provenance.md`](docs/provenance.md).
 Optional SPDX licensing assertions are documented in
 [`docs/licensing.md`](docs/licensing.md). They are additive and do not require
 existing Sources, Binaries or signed Batches to be rewritten.
+
+The additive Binary/library distinction and signed component claims are
+documented in [`docs/software-components.md`](docs/software-components.md).
 
 ## Repository structure
 
@@ -100,20 +103,20 @@ Automatic extraction from an FIDBF is a deferred stretch goal.
 
 Items shown in parentheses in the implementation plan are stretch goals.
 
-## Planned integrity service
+## Integrity service
 
-The future append-only integrity layer is recorded as a design stub, including
+The append-only integrity layer includes
 an eight-step **MMR visual explainer** showing how permanent leaf indexes and
 peaks evolve as records are appended.
 
 See [`docs/integrity-mmr.md`](docs/integrity-mmr.md). The immutable checkpoint
-schema is defined; the MMR worker and proof service remain planned.
+schema and a working PostgreSQL checkpoint worker. The proof API remains planned.
 
 The deliberately separate object, integrity-chain and MMR worker boundaries
 are documented in [`docs/workers.md`](docs/workers.md). Their pure calculation
-and signature code is implemented and tested. FIDBF admission now has a client
-signer and PostgreSQL adapter; MMR service entry points remain fail closed until
-their database and key-custody adapters are implemented and reviewed.
+and signature code is implemented and tested. FIDBF admission has a client
+signer and PostgreSQL adapter, and `relic-checkpoint-mmr` reconstructs, verifies,
+signs and stores real MMR frontiers from the database integrity chain.
 
 ## Contributing
 
@@ -145,8 +148,9 @@ The server updater fetches and fast-forwards the shared checkout at `/srv/relic`
 
 Database changes are deliberately applied separately. After updating the
 checkout, run `scripts/apply-database-migrations.sh` as root. It installs the
-MMR checkpoint, BSim membership and optional licensing-assertion changes once,
-preserving existing records and safely reporting changes already present.
+MMR checkpoint, BSim membership, licensing, inline OCSF provenance and
+software-component changes once, preserving existing records and safely
+reporting changes already present.
 
 ## Licence
 

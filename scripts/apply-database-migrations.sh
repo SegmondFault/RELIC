@@ -13,12 +13,14 @@ mmr_migration="$relic_dir/database/migrations/002-mmr-checkpoints.sql"
 bsim_migration="$relic_dir/database/migrations/003-bsim-membership.sql"
 mmr_uniqueness_migration="$relic_dir/database/migrations/004-mmr-leaf-count-uniqueness.sql"
 license_assertion_migration="$relic_dir/database/migrations/005-license-assertions.sql"
+ocsf_component_migration="$relic_dir/database/migrations/006-ocsf-provenance-and-software-components.sql"
 
 for migration_file in \
     "$mmr_migration" \
     "$bsim_migration" \
     "$mmr_uniqueness_migration" \
-    "$license_assertion_migration"; do
+    "$license_assertion_migration" \
+    "$ocsf_component_migration"; do
     if [[ ! -f "$migration_file" ]]; then
         echo "Migration file not found: $migration_file" >&2
         exit 1
@@ -106,4 +108,30 @@ else
         -f "$license_assertion_migration"
 
     echo "Installed catalogue.license_assertion."
+fi
+
+ocsf_components_installed="$(
+    runuser -u postgres -- psql --no-psqlrc -X -d "$database_name" -Atqc \
+        "SELECT CASE WHEN
+            EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'catalogue'
+                   AND table_name = 'provenance'
+                   AND column_name = 'object_data'
+            )
+            AND to_regclass('catalogue.software_component') IS NOT NULL
+            AND to_regclass('catalogue.software_release') IS NOT NULL
+            AND to_regclass('catalogue.binary_component_assertion') IS NOT NULL
+        THEN 1 ELSE 0 END"
+)"
+
+if [[ "$ocsf_components_installed" == "1" ]]; then
+    echo "OCSF provenance and software-component assertions are already installed."
+else
+    runuser -u postgres -- psql --no-psqlrc -X \
+        -v ON_ERROR_STOP=1 \
+        -d "$database_name" \
+        -f "$ocsf_component_migration"
+
+    echo "Installed inline OCSF provenance and software-component assertions."
 fi

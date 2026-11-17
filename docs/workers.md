@@ -87,6 +87,21 @@ Only one checkpoint sequencer may advance a format version at a time. The
 worker must be able to reconstruct and compare the expected frontier before it
 continues from a stored checkpoint.
 
+## Legacy BSim chain reconciliation
+
+`relic-chain-bsim` is a one-shot migration worker for BSim rows admitted before
+atomic BSim ingestion existed. It does not create or modify BSim objects. In one
+serializable transaction it locks the integrity sequencer, verifies the
+integrity-system identity/key, calculates a domain-separated canonical record
+hash for each uncovered BSim row, signs and appends the corresponding integrity
+entries, and commits once. Exact reruns are idempotent because already-covered
+canonical record hashes are skipped.
+
+This command is not a substitute for the public BSim API. New BSim submissions
+must verify the analyst signature and insert the BSim plus its integrity entry
+atomically. The reconciliation worker exists only to make retained POC evidence
+cryptographically reachable without rewriting those authoritative BSim rows.
+
 ## Hashing and signing
 
 Hashing and signing are implemented in shared Rust library code so that workers

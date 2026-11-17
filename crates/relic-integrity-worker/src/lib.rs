@@ -1,13 +1,19 @@
 //! Deterministic integrity-chain calculation and signing.
 //!
-//! The database adapter must perform tip locking, authoritative-row inserts
-//! and integrity-row insertion in one transaction. This crate deliberately
-//! contains no database connection or private-key loading code.
+//! Database adapters perform tip locking and integrity insertion in one
+//! transaction. Private-key loading remains in the producing CLI process.
 
+use std::{collections::HashSet, str::FromStr};
+
+use chrono::{DateTime, Utc};
+use postgres::{Client, IsolationLevel};
 use relic_crypto::{Digest32, SystemSigner, hash_fields, verify_digest_signature};
+use thiserror::Error;
+use uuid::Uuid;
 
 const CHAIN_HASH_DOMAIN: &[u8] = b"RELIC:integrity-chain-hash:v1";
 const SIGNATURE_DOMAIN: &[u8] = b"RELIC:integrity-system-signature:v1";
+const BSIM_RECORD_DOMAIN: &[u8] = b"RELIC:bsim-record:v1";
 
 /// Unsigned, canonical fields committed by an integrity-chain entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +100,179 @@ pub fn sign_entry(envelope: IntegrityEnvelope, signer: &SystemSigner) -> SignedI
         chain_hash,
         system_signature,
     }
+}
+
+/// Summary of a `BSim` integrity reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BsimChainResult {
+    pub inserted: usize,
+    pub last_integrity_id: Option<i64>,
+    pub chain_tip: Option<String>,
+}
+
+/// Append one real, system-signed integrity entry for every `BSim` row not yet
+/// represented by its canonical record hash.
+///
+/// This is a legacy reconciliation path for `BSim` objects that were admitted
+/// before atomic `BSim` ingestion existed. It never inserts or changes a `BSim`.
+///
+/// # Errors
+///
+/// Returns without commit if the chain, system identity, or database state is
+/// invalid.
+#[allow(clippy::too_many_lines)]
+pub fn chain_uncovered_bsim_postgres(
+    client: &mut Client,
+    system_user_id: Uuid,
+    signer: &SystemSigner,
+) -> Result<BsimChainResult, BsimChainError> {
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()?;
+    transaction.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended('RELIC:integrity-sequencer:v1', 0))",
+        &[],
+    )?;
+
+    let identity = transaction.query_opt(
+        "SELECT owner_type::text, public_key,
+                catalogue.account_is_revoked(user_id)
+           FROM catalogue.user_public WHERE user_id = $1",
+        &[&system_user_id],
+    )?;
+    let identity = identity.ok_or(BsimChainError::UnknownSystemIdentity)?;
+    let owner_type: String = identity.get(0);
+    let public_key: Vec<u8> = identity.get(1);
+    let revoked: bool = identity.get(2);
+    if owner_type != "system" || revoked || public_key.as_slice() != signer.verifying_key() {
+        return Err(BsimChainError::SystemIdentityMismatch);
+    }
+
+    let covered = transaction
+        .query("SELECT record_hash::text FROM catalogue.integrity", &[])?
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<HashSet<_>>();
+    let rows = transaction.query(
+        "SELECT b.bsim_id, b.source_id, s.source_type, b.sha256::text,
+                b.md5::text, b.created_at, b.submitted_by_user_id, b.signature
+           FROM catalogue.bsim AS b
+           JOIN catalogue.source AS s USING (source_id)
+          ORDER BY b.created_at, b.bsim_id",
+        &[],
+    )?;
+
+    let mut previous = transaction
+        .query_opt(
+            "SELECT integrity_id, chain_hash::text
+               FROM catalogue.integrity ORDER BY integrity_id DESC LIMIT 1",
+            &[],
+        )?
+        .map(|row| {
+            let integrity_id: i64 = row.get(0);
+            let digest = Digest32::from_str(&row.get::<_, String>(1))
+                .map_err(|_| BsimChainError::MalformedChainTip)?;
+            Ok::<_, BsimChainError>((integrity_id, digest))
+        })
+        .transpose()?;
+    let mut inserted = 0_usize;
+
+    for row in rows {
+        let bsim_id: Uuid = row.get(0);
+        let source_id: Uuid = row.get(1);
+        let source_type: String = row.get(2);
+        let sha256: String = row.get(3);
+        let md5: String = row.get(4);
+        let created_at: DateTime<Utc> = row.get(5);
+        let submitter: Uuid = row.get(6);
+        let signature: Vec<u8> = row.get(7);
+        let record_hash = hash_fields(
+            BSIM_RECORD_DOMAIN,
+            &[
+                bsim_id.as_bytes(),
+                source_id.as_bytes(),
+                sha256.as_bytes(),
+                md5.as_bytes(),
+                &created_at.timestamp_micros().to_be_bytes(),
+                submitter.as_bytes(),
+                &signature,
+            ],
+        );
+        if covered.contains(&record_hash.to_string()) {
+            continue;
+        }
+
+        let accepted_at_micros: i64 = transaction
+            .query_one(
+                "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint",
+                &[],
+            )?
+            .get(0);
+        let accepted_at = DateTime::<Utc>::from_timestamp_micros(accepted_at_micros)
+            .ok_or(BsimChainError::TimestampOutOfRange(accepted_at_micros))?;
+        let entry = sign_entry(
+            IntegrityEnvelope {
+                source_id: source_id.to_string(),
+                source_type: source_type.clone(),
+                record_hash,
+                prev_hash: previous.map(|(_, digest)| digest),
+                format_version: 1,
+                created_at_unix_micros: accepted_at_micros,
+                system_uid: system_user_id.to_string(),
+            },
+            signer,
+        );
+        entry
+            .verify(&signer.verifying_key())
+            .map_err(|_| BsimChainError::GeneratedEntryInvalid)?;
+        let integrity_id: i64 = transaction
+            .query_one(
+                "INSERT INTO catalogue.integrity
+                (source_id, source_type, record_hash, prev_hash, chain_hash,
+                 format_version, created_at, system_signature, system_uid)
+             VALUES ($1,$2,CAST($3 AS text)::catalogue.sha256_hex,
+                     CAST($4 AS text)::catalogue.sha256_hex,
+                     CAST($5 AS text)::catalogue.sha256_hex,1,$6,$7,$8)
+             RETURNING integrity_id",
+                &[
+                    &source_id,
+                    &source_type,
+                    &entry.envelope.record_hash.to_string(),
+                    &entry.envelope.prev_hash.map(|digest| digest.to_string()),
+                    &entry.chain_hash.to_string(),
+                    &accepted_at,
+                    &&entry.system_signature[..],
+                    &system_user_id,
+                ],
+            )?
+            .get(0);
+        previous = Some((integrity_id, entry.chain_hash));
+        inserted += 1;
+    }
+
+    transaction.commit()?;
+    Ok(BsimChainResult {
+        inserted,
+        last_integrity_id: previous.map(|(id, _)| id),
+        chain_tip: previous.map(|(_, digest)| digest.to_string()),
+    })
+}
+
+#[derive(Debug, Error)]
+pub enum BsimChainError {
+    #[error("database operation failed: {0}")]
+    Database(#[from] postgres::Error),
+    #[error("integrity system identity does not exist")]
+    UnknownSystemIdentity,
+    #[error("integrity system identity is revoked, wrong type, or does not match the key")]
+    SystemIdentityMismatch,
+    #[error("integrity chain tip is malformed")]
+    MalformedChainTip,
+    #[error("database timestamp is outside the supported range: {0}")]
+    TimestampOutOfRange(i64),
+    #[error("generated integrity entry failed self-verification")]
+    GeneratedEntryInvalid,
 }
 
 /// Integrity verification failure.
