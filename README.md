@@ -47,6 +47,7 @@ The repository currently contains:
 - foundational Rust submission types and validation;
 - client-side analyst signing and atomic PostgreSQL FIDBF ingestion;
 - the working schema and implementation plan;
+- encrypted database/object/key backup and restore tooling;
 - a root-only server update script.
 
 The API, object-storage integration, matching services, proof API and
@@ -88,6 +89,7 @@ crates/     Small Rust domain components
 database/   PostgreSQL schema and access policy
 docs/       Design notes and visual explainers
 design/     Working schema and implementation plan
+backup/     Backup scripts, systemd units and operator docs
 scripts/    Controlled operational scripts
 ```
 
@@ -121,6 +123,22 @@ are documented in [`docs/workers.md`](docs/workers.md). Their pure calculation
 and signature code is implemented and tested. FIDBF admission has a client
 signer and PostgreSQL adapter, and `relic-checkpoint-mmr` reconstructs, verifies,
 signs and stores real MMR frontiers from the database integrity chain.
+
+## Backups
+
+The backup tooling is under [`backup/`](backup/) and is documented in
+[`backup/docs/backups.md`](backup/docs/backups.md). A database dump alone is not a complete
+RELIC backup: the encrypted run also covers the FIDBF/provenance object roots,
+the root-only system keys, PostgreSQL configuration and the manifest tying the
+Git commit and migrations to the dump.
+
+The VPS backup job runs as root from a systemd timer, encrypts every artifact
+with `age`, and pushes the completed run to a restricted rsync account on a
+separate backup host. The upload account cannot read or delete archived runs;
+retention runs on the backup host. The VPS/backup-host operator checklist is
+[`backup/docs/backup-handoff.md`](backup/docs/backup-handoff.md). It covers key generation,
+the restricted SSH account, the configuration file, the systemd units, the
+first backup, retention and the restore drill.
 
 ## Contributing
 

@@ -1,2 +1,7 @@
 /target/
 
+# Local backup artifacts and secrets
+*.age
+relic-backup-age.key
+relic-backup-age.key.pub
+
