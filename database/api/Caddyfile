@@ -1,0 +1,22 @@
+{
+	default_sni {$RELIC_HOST}
+	cert_issuer acme {$ACME_CA} {
+		profile {$ACME_PROFILE}
+	}
+}
+
+{$RELIC_HOST} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+		-Via
+	}
+	encode zstd gzip
+	reverse_proxy api:8000
+}

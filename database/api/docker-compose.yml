@@ -1,0 +1,30 @@
+services:
+  api:
+    build:
+      context: .
+    env_file: .env
+    restart: unless-stopped
+    expose:
+      - "8000"
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      RELIC_HOST: ${RELIC_HOST:?RELIC_HOST must be set to the public IP or domain}
+      ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      ACME_PROFILE: ${ACME_PROFILE:-shortlived}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
