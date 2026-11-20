@@ -1,3 +1,13 @@
 /target/
 
+# Environment variables and secrets
 .env
+
+# Python development
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Private keys
+*_private.pem
+*.key
