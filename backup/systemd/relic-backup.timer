@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily encrypted RELIC backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=relic-backup.service
+
+[Install]
+WantedBy=timers.target

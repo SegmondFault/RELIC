@@ -3,6 +3,11 @@
 # Environment variables and secrets
 .env
 
+# Local backup artifacts and secrets
+*.age
+relic-backup-age.key
+relic-backup-age.key.pub
+
 # Python development
 .venv/
 __pycache__/

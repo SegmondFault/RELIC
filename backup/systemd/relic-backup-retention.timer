@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily retention for the RELIC backup archive
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+RandomizedDelaySec=20m
+AccuracySec=1m
+Persistent=true
+Unit=relic-backup-retention.service
+
+[Install]
+WantedBy=timers.target
