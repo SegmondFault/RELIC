@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..deps import current_identity
 from ._stubs import todo
 
-router = APIRouter(tags=["submissions"])
+router = APIRouter(dependencies=[Depends(current_identity)], tags=["submissions"])
 
 
 @router.post("/sources", status_code=201)

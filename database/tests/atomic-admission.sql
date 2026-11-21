@@ -19,8 +19,8 @@ BEGIN
     BEGIN
         INSERT INTO user_public (user_id, public_key, role, owner_type)
         VALUES
-            (analyst_id, '\x01', 'analyst', 'human'),
-            (system_id, '\x02', NULL, 'system');
+            (analyst_id, decode(repeat('01', 32), 'hex'), 'analyst', 'human'),
+            (system_id, decode(repeat('02', 32), 'hex'), NULL, 'system');
 
         INSERT INTO source (
             source_id, name, source_type, retrieved_at,
@@ -74,8 +74,8 @@ DECLARE
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
     VALUES
-        (analyst_id, '\x31', 'analyst', 'human'),
-        (viewer_id, '\x32', 'viewer', 'human');
+        (analyst_id, decode(repeat('31', 32), 'hex'), 'analyst', 'human'),
+        (viewer_id, decode(repeat('32', 32), 'hex'), 'viewer', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,
@@ -164,9 +164,9 @@ DECLARE
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
     VALUES
-        (analyst_id, '\x11', 'analyst', 'human'),
-        (integrity_system_id, '\x12', NULL, 'system'),
-        (mmr_system_id, '\x13', NULL, 'system');
+        (analyst_id, decode(repeat('11', 32), 'hex'), 'analyst', 'human'),
+        (integrity_system_id, decode(repeat('12', 32), 'hex'), NULL, 'system'),
+        (mmr_system_id, decode(repeat('13', 32), 'hex'), NULL, 'system');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,
@@ -285,7 +285,7 @@ DECLARE
     rejected boolean;
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
-    VALUES (analyst_id, '\x41', 'analyst', 'human');
+    VALUES (analyst_id, decode(repeat('41', 32), 'hex'), 'analyst', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at, is_ecological,
@@ -383,7 +383,7 @@ DECLARE
     rejected boolean;
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
-    VALUES (analyst_id, '\x51', 'analyst', 'human');
+    VALUES (analyst_id, decode(repeat('51', 32), 'hex'), 'analyst', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,

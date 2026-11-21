@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "relic-sign-fidbf"
 path = "src/bin/sign-fidbf.rs"
 
+[[bin]]
+name = "relic-sign-challenge"
+path = "src/bin/sign-challenge.rs"
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }

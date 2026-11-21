@@ -26,10 +26,20 @@ __all__ = [
 
 def make_pool(settings: Settings) -> AsyncConnectionPool:
     return AsyncConnectionPool(
-        conninfo=settings.database_url,
+        conninfo=settings.database_url.get_secret_value(),
         min_size=settings.pool_min_size,
         max_size=settings.pool_max_size,
-        kwargs={"autocommit": True, "row_factory": dict_row},
+        kwargs={
+            "autocommit": True,
+            "row_factory": dict_row,
+            "application_name": "relic-api",
+            # Bound every statement and abandoned transaction server-side.
+            "options": (
+                f"-c statement_timeout={settings.statement_timeout_ms}"
+                f" -c idle_in_transaction_session_timeout={settings.statement_timeout_ms * 2}"
+            ),
+        },
+        timeout=10,
         open=False,
     )
 

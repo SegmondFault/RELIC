@@ -1262,6 +1262,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek 3.0.0",
  "rand_core 0.6.4",
+ "serde_json",
  "sha2 0.11.1",
  "ssh-key",
  "tempfile",

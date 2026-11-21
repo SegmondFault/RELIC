@@ -1,32 +1,78 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
-from pydantic import field_validator
+from psycopg.conninfo import conninfo_to_dict
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_HOST = re.compile(r"^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$")
+_LOOPBACK = {"", "localhost", "127.0.0.1", "::1"}
+_TLS_MODES = {"require", "verify-ca", "verify-full"}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RELIC_",
         env_file=".env",
-        extra="ignore"
+        extra="ignore",
     )
 
-    database_url: str
-    jwt_secret: str
-    jwt_ttl_seconds: int = 900
-    pool_min_size: int = 2
-    pool_max_size: int = 10
+    # Public host name (or IP) of this deployment, without scheme. Signed
+    # challenges and tokens are bound to https://<host> so they cannot be
+    # replayed against another RELIC deployment.
+    host: str
+    database_url: SecretStr
+    jwt_secret: SecretStr
+    jwt_ttl_seconds: int = Field(28800, ge=60, le=28800)
+    challenge_ttl_seconds: int = Field(120, ge=1, le=600)
 
+    pool_min_size: int = Field(2, ge=0)
+    pool_max_size: int = Field(10, ge=1)
+    statement_timeout_ms: int = Field(5000, ge=100)
+
+    max_body_bytes: int = Field(64 * 1024, ge=1024)
+    global_rate_limit_per_minute: int = Field(300, ge=1)
+    auth_rate_limit_per_minute: int = Field(10, ge=1)
+    registration_rate_limit_per_hour: int = Field(5, ge=1)
+
+    # Development only: enables /docs and plaintext remote database links.
     insecure_dev_mode: bool = False
+
+    @field_validator("host")
+    @classmethod
+    def _bare_host(cls, value: str) -> str:
+        if not _HOST.fullmatch(value):
+            raise ValueError("RELIC_HOST must be a bare host name or IP, without scheme or path")
+        return value.lower()
 
     @field_validator("jwt_secret")
     @classmethod
-    def _long_secret(cls, v: str) -> str:
-        if len(v) < 32:
+    def _long_secret(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value()) < 32:
             raise ValueError("RELIC_JWT_SECRET must be at least 32 characters")
-        return v
+        return value
+
+    @model_validator(mode="after")
+    def _database_link_is_protected(self) -> Settings:
+        params = conninfo_to_dict(self.database_url.get_secret_value())
+        host = str(params.get("host") or "")
+        local = host in _LOOPBACK or host.startswith("/")
+        if not local and params.get("sslmode") not in _TLS_MODES and not self.insecure_dev_mode:
+            raise ValueError(
+                "RELIC_DATABASE_URL points at a remote host without TLS; "
+                "add sslmode=verify-full (preferred) or sslmode=require"
+            )
+        if self.pool_min_size > self.pool_max_size:
+            raise ValueError("RELIC_POOL_MIN_SIZE must not exceed RELIC_POOL_MAX_SIZE")
+        return self
+
+    @property
+    def audience(self) -> str:
+        return f"https://{self.host}"
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

@@ -17,6 +17,16 @@
 		-Server
 		-Via
 	}
+	request_body {
+		max_size 1MB
+	}
+	header {
+		Cache-Control "no-store"
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+	}
 	encode zstd gzip
-	reverse_proxy api:8000
+	reverse_proxy api:8000 {
+		header_up -X-Forwarded-For
+		header_up X-Forwarded-For {remote_host}
+	}
 }

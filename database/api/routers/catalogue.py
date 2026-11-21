@@ -2,21 +2,44 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ..deps import ConnDep, current_identity
+from ..schemas import UserPublic
 from ._stubs import todo
 
-router = APIRouter(tags=["catalogue"])
+# Every catalogue read requires an authenticated, non-revoked human account.
+router = APIRouter(tags=["catalogue"], dependencies=[Depends(current_identity)])
+
+_USER_COLUMNS = """
+    SELECT user_id, role::text AS role, owner_type::text AS owner_type,
+           encode(public_key, 'hex') AS public_key, created_at,
+           catalogue.account_is_revoked(user_id) AS revoked
+      FROM catalogue.user_public
+"""
 
 
-@router.get("/users")
-async def list_users(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    todo()
+@router.get("/users", response_model=list[UserPublic])
+async def list_users(
+    conn: ConnDep,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0, le=1_000_000),
+):
+    """Public identities only: never names, email addresses or organisations."""
+    cur = await conn.execute(
+        _USER_COLUMNS + " ORDER BY created_at, user_id LIMIT %s OFFSET %s",
+        (limit, offset),
+    )
+    return await cur.fetchall()
 
 
-@router.get("/users/{user_id}")
-async def get_user(user_id: UUID):
-    todo()
+@router.get("/users/{user_id}", response_model=UserPublic)
+async def get_user(user_id: UUID, conn: ConnDep):
+    cur = await conn.execute(_USER_COLUMNS + " WHERE user_id = %s", (user_id,))
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return row
 
 
 @router.get("/sources")

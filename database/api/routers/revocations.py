@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..deps import current_identity
 from ._stubs import todo
 
-router = APIRouter(tags=["revocations"])
+router = APIRouter(dependencies=[Depends(current_identity)], tags=["revocations"])
 
 
 @router.post("/revocations", status_code=201)
