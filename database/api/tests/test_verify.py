@@ -118,7 +118,8 @@ def test_genuine_rows_verify_and_forgeries_are_reported(client, database, tmp_pa
     ):
         assert report["checked"].get(kind, 0) > 0, kind
 
-    # --- Forgeries, written the way a compromised API (relic_app) could ----
+    # --- Forgeries: user-signed rows as a compromised API (relic_app) could
+    # write them, and an admission altered with a stolen worker login ------
     forged_flag, forged_revocation = uuid.uuid4(), uuid.uuid4()
     forged_registration = _register(client, "analyst")
     with psycopg.connect(database.app_url, autocommit=True) as conn:
@@ -136,6 +137,7 @@ def test_genuine_rows_verify_and_forgeries_are_reported(client, database, tmp_pa
             "SELECT catalogue.decide_registration(%s, %s, 'approved', %s)",
             (forged_registration, moderators[0].user_id, b"\x09" * 64),
         )
+    with psycopg.connect(database.worker_url, autocommit=True) as conn:
         # An extra function slipped into an admitted binary.
         conn.execute(
             "INSERT INTO catalogue.function_record (function_id, binary_id, fidbf_id,"
@@ -162,6 +164,34 @@ def test_genuine_rows_verify_and_forgeries_are_reported(client, database, tmp_pa
     # Text output names each forgery on a FAIL line.
     code, text = run_verify(database.auditor_url, "--quiet")
     assert code == 1 and f"FAIL flag {forged_flag}" in text and "VERIFIED" not in text
+
+
+def test_forged_second_approval_is_reported_by_relic_verify(client, database):
+    """The database accepts two approvals by different active Moderators without
+    checking their signatures, so a compromised API can add a Moderator with
+    forged ones. relic-verify must report every forged signature."""
+    first, second = (database.create_user("moderator") for _ in range(2))
+    request_id = _register(client, "moderator")
+    with psycopg.connect(database.app_url, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO catalogue.registration_approval"
+            " (registration_request_id, moderator_id, approval_signature) VALUES (%s, %s, %s)",
+            (request_id, first.user_id, b"\x0a" * 64),
+        )
+        created = conn.execute(
+            "SELECT catalogue.decide_registration(%s, %s, 'approved', %s)",
+            (request_id, second.user_id, b"\x0b" * 64),
+        ).fetchone()[0]
+    assert created is not None  # the database alone cannot tell
+
+    code, report = verify_json(database)
+    assert code == 1
+    problems = [
+        f"{f['kind']}: {f['problem']}" for f in report["failures"] if f["id"] == request_id
+    ]
+    assert any(p.startswith("registration approval:") for p in problems), problems
+    assert any("without a second Moderator" in p for p in problems), problems
+    assert any(str(second.user_id) in p for p in problems), problems
 
 
 def test_owner_fixture_chain_entries_are_reported(database, client, tmp_path: Path):

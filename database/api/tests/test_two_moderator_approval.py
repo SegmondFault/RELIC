@@ -168,7 +168,13 @@ def test_forged_first_approval_is_rejected_without_change(client, database, mode
 
 
 def test_database_refuses_single_moderator_approval(client, database, moderators):
-    """Even calling decide_registration() directly as the API's login."""
+    """Without a stored first approval, even calling decide_registration() as relic_app.
+
+    This stops a buggy API or one dishonest Moderator. It cannot stop a
+    compromised API, which could also store a forged first approval; the
+    database does not verify signatures. relic-verify reports that
+    (see test_forged_second_approval_is_reported_by_relic_verify).
+    """
     first = moderators[0]
     _, request_id = _register(client, "moderator")
     with psycopg.connect(database.app_url) as conn, pytest.raises(
@@ -261,7 +267,7 @@ def test_revoking_other_accounts_needs_one_moderator(client, database, moderator
 
 
 def test_database_refuses_single_moderator_revocation(database, moderators, moderator_revocation):
-    """A compromised API cannot revoke a Moderator with one decision; the operator can."""
+    """Without a stored first approval the API's login cannot revoke a Moderator; the operator can."""
     stored, _ = moderator_revocation
     update = (
         "UPDATE catalogue.revocation SET moderator_id = %s, decision = 'approved',"

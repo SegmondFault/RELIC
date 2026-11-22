@@ -44,13 +44,18 @@ def _granted(database, role: str, privilege: str) -> set[str]:
     }
 
 
+API_INSERTS = {
+    "auth_challenge", "registration_request", "registration_approval", "revocation",
+    "revocation_approval", "flag", "flag_response",
+}
+
+
 def test_api_login_privileges(database):
     tables = _tables(database)
     assert _granted(database, "relic_app", "SELECT") == tables - {"user_private"}
-    # Accounts only via decide_registration(); system evidence only via workers.
-    assert _granted(database, "relic_app", "INSERT") == tables - {
-        "user_public", "user_private", *APPEND_ONLY_EVIDENCE,
-    }
+    # Only what its routes write: accounts only via decide_registration(),
+    # system evidence only via workers, corpus objects only once a route exists.
+    assert _granted(database, "relic_app", "INSERT") == API_INSERTS
     assert _granted(database, "relic_app", "UPDATE") == {"auth_challenge", "revocation"}
     assert _granted(database, "relic_app", "DELETE") == set()
 
@@ -61,6 +66,19 @@ def test_worker_login_privileges(database):
     assert _granted(database, "relic_worker", "INSERT") == WORKER_INSERTS
     assert _granted(database, "relic_worker", "UPDATE") == set()
     assert _granted(database, "relic_worker", "DELETE") == set()
+
+
+def test_new_tables_are_not_writable_by_the_api(database):
+    database.execute("CREATE TABLE catalogue.default_privilege_probe (x int)")
+    try:
+        writable = database.execute(
+            "SELECT has_table_privilege('relic_app', 'catalogue.default_privilege_probe', 'INSERT'),"
+            "       has_table_privilege('relic_app', 'catalogue.default_privilege_probe', 'UPDATE'),"
+            "       has_table_privilege('relic_app', 'catalogue.default_privilege_probe', 'SELECT')"
+        )[0]
+    finally:
+        database.execute("DROP TABLE catalogue.default_privilege_probe")
+    assert writable == (False, False, True)
 
 
 def test_auditor_login_only_reads(database):

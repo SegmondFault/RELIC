@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..crypto import REGISTRATION_DECISION_SIGNATURE_DOMAIN, registration_decision_record, verify
-from ..deps import ConnDep, Identity, require_roles
+from ..deps import ConnDep, Identity, registered_key, require_roles
 from . import _approvals
 from ..schemas import (
     AwaitingSecondApproval,
@@ -114,11 +114,7 @@ async def decide_registration(
         if request["decision"] is not None:
             raise HTTPException(status_code=409, detail="Registration request is already decided")
 
-        cur = await conn.execute(
-            "SELECT public_key FROM catalogue.user_public WHERE user_id = %s",
-            (moderator.user_id,),
-        )
-        moderator_key = (await cur.fetchone())["public_key"]
+        moderator_key = await registered_key(conn, moderator.user_id)
         signature = bytes.fromhex(body.signature)
         record = registration_decision_record(
             registration_request_id,

@@ -186,30 +186,7 @@ fn check_signature(
         );
         return false;
     }
-    verify_with(
-        report,
-        kind,
-        id,
-        account.key,
-        signer,
-        domain,
-        digest,
-        signature,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn verify_with(
-    report: &mut Report,
-    kind: &'static str,
-    id: &str,
-    key: Option<[u8; 32]>,
-    signer: Uuid,
-    domain: &[u8],
-    digest: &Digest32,
-    signature: &[u8],
-) -> bool {
-    let (Some(key), Ok(signature)) = (key, <[u8; 64]>::try_from(signature)) else {
+    let (Some(key), Ok(signature)) = (account.key, <[u8; 64]>::try_from(signature)) else {
         report.fail(kind, id, "malformed key or signature");
         return false;
     };
@@ -303,17 +280,23 @@ fn registrations(
         };
         let proof: Vec<u8> = row.get(10);
         // Proof of possession: the applicant's own key over the challenge.
-        if verify_with(
-            report,
-            KIND,
-            &id_text,
-            Some(key),
-            id,
-            auth::REGISTRATION_SIGNATURE_DOMAIN,
-            &auth::registration_digest(&challenge, &details),
-            &proof,
-        ) {
+        let proof_ok = <[u8; 64]>::try_from(proof).is_ok_and(|proof| {
+            verify_digest_signature(
+                &key,
+                auth::REGISTRATION_SIGNATURE_DOMAIN,
+                &auth::registration_digest(&challenge, &details),
+                &proof,
+            )
+            .is_ok()
+        });
+        if proof_ok {
             report.checked("registration proofs");
+        } else {
+            report.fail(
+                KIND,
+                &id_text,
+                "the applicant's proof of possession does not verify with the requested key",
+            );
         }
 
         let decision_digest = |moderator: Uuid, decision| {
@@ -705,7 +688,9 @@ fn integrity_chain(
         report.fail(KIND, "chain", "more than one genesis entry");
     }
     let mut next = genesis.first().copied();
-    while let Some(index) = next {
+    // Bounded: with chain_hash UNIQUE a walk cannot revisit an entry, but the
+    // verifier must terminate even on a database whose constraints were dropped.
+    while let Some(index) = next.filter(|_| chain.entries.len() < rows.len()) {
         let row = &rows[index];
         let integrity_id: i64 = row.get(0);
         let chain_hash_text: String = row.get(5);

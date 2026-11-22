@@ -36,12 +36,14 @@ permanent Ed25519 public key. Human accounts have exactly one role
 | Login | Used by | May write |
 |---|---|---|
 | `relic_owner` | Migrations and the database operator (NOLOGIN; reached with `SET ROLE`) | Everything. Owns the schema. Creates the first Moderator and system accounts, and is the only one allowed to revoke a system account. |
-| `relic_app` | This API (`RELIC_DATABASE_URL`) | User-signed rows: challenges, registration requests, revocations, flags and responses (and, for the coming submission routes, corpus objects). Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
+| `relic_app` | This API (`RELIC_DATABASE_URL`) | Inserts only what its routes write: challenges, registration requests, first approvals, revocations, flags and responses; each submission route will grant its own table. New tables are read-only for it by default. Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
 | `relic_worker` | `relic-ingest-fidbf`, `relic-chain-bsim`, `relic-checkpoint-mmr` | Appends only: FIDBF admissions (source, batch, binary, FIDBF, functions) and system-signed integrity entries and checkpoints. Reads catalogue data, never contact details, registration requests or login challenges. |
 | `relic_auditor` | `relic-verify` (e.g. from cron) | Nothing; read-only transactions by default. Reads everything it re-verifies (including registration requests and their challenges), never `user_private`. |
 
-The database checks who a system row names, not its signature, so only the
-workers, which hold the system keys, may append system-signed evidence.
+The database checks who a row names and its shape, not its signature. Only the
+workers, which hold the system keys, may append system-signed evidence; for
+user-signed rows the API is trusted to verify, and `relic-verify` re-checks
+them afterwards.
 `tests/test_database_roles.py` pins both privilege sets.
 
 ## Endpoints

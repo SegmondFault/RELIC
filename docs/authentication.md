@@ -107,9 +107,11 @@ be replayed.
 decision message with their own `moderator_id`. The first approval is stored
 in `registration_approval` (`202 awaiting_second_approval`); the approval of a
 second, different active Moderator creates the account. One rejection is
-final. The database enforces this too, inside `decide_registration()`, so a
-single Moderator (or a compromised API) cannot add a Moderator. The first
-Moderators are created by the database operator. Every field is stored in the row, so anyone can re-verify the
+final. The database enforces the rule too (inside `decide_registration()`),
+so neither a single Moderator nor an API bug can add a Moderator. It checks
+that two different active Moderators approved, not their signatures: a
+compromised API could store forged approvals, which `relic-verify` reports.
+The first Moderators are created by the database operator. Every field is stored in the row, so anyone can re-verify the
 decision later without the API.
 
 ### Revocation request

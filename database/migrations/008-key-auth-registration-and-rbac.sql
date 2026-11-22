@@ -28,7 +28,9 @@
 -- * Every stored signature (corpus objects, integrity entries, MMR
 --   checkpoints) must be a 64-byte Ed25519 signature.
 -- * Workers get their own login, relic_worker; the API's relic_app can no
---   longer append to the integrity chain or MMR checkpoints.
+--   longer append to the integrity chain or MMR checkpoints, and inserts
+--   only into the tables its routes write (new tables: read-only by default).
+-- * relic_auditor: a read-only login for relic-verify.
 -- * Approving a Moderator registration, and approving the revocation of a
 --   Moderator account, need two different active Moderators.
 -- * Foreign-key indexes used by filtered catalogue lists also cover the
@@ -1048,6 +1050,20 @@ GRANT EXECUTE ON FUNCTION purge_expired_auth_challenges() TO relic_app;
 -- account's name to a chain that can never be edited.
 
 REVOKE INSERT ON integrity, mmr_checkpoint FROM relic_app;
+
+-- relic_app inserts only what its routes write: challenges, registration
+-- requests, revocations, first approvals, flags and flag responses. Each
+-- submission route grants its own table when it is implemented, so a
+-- compromised API cannot write rows no route needs (some of which have no
+-- signed format relic-verify could check yet), and new tables are not
+-- writable by the API unless a migration says so.
+REVOKE INSERT ON
+    source, batch, binary_record, fidbf, function_record, bsim, function_bsim,
+    provenance, license_assertion, software_component, software_release,
+    binary_component_assertion, behavioural_composition, composition_member,
+    classification
+FROM relic_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FROM relic_app;
 
 GRANT USAGE ON SCHEMA catalogue TO relic_worker;
 
