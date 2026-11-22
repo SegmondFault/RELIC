@@ -120,7 +120,11 @@ stored request (`200`); the same ID with different content is `409`.
 
 The database allows one open request per target and refuses a request for a
 target that is already revoked (both `409`). A rejected target can be
-requested again. Revoking an account (`target_type = user`) is how a lost or
+requested again. The requester must be an active Analyst when filing; the
+request stays decidable if they are revoked afterwards, so a revoked requester
+cannot block a target. System accounts (the integrity and MMR workers) cannot
+be revoked through the API (`403`): revoking one stops admissions and
+checkpoints, so only the database operator (`relic_owner`) can do it. Revoking an account (`target_type = user`) is how a lost or
 compromised key is handled: the next request with its token is `401`, and
 login reports `403 Account has been revoked`.
 
@@ -135,7 +139,7 @@ As with registrations, the Moderator signs exactly what they reviewed
 (`GET /v1/revocations/{id}`) and their verdict, `moderator_id` must be the
 caller, and the API verifies with that Moderator's registered key over the
 stored row in the same transaction as the update. The database re-checks that
-the requester is still an active Analyst and the decider an active Moderator,
+the decider is an active Moderator,
 forbids a Moderator deciding the revocation of their own account, sets
 `decided_at` from its own clock, and makes the decision final. Anyone logged in
 can read revocations and re-verify both signatures from the row.

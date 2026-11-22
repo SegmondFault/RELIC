@@ -444,13 +444,26 @@ def test_unknown_revocation_is_404(client, moderator, moderator_headers, pending
     assert response.status_code == 404
 
 
-def test_request_by_since_revoked_analyst_cannot_be_decided(
-    client, database, pending, analyst, moderator, moderator_headers
+def test_request_stays_decidable_after_its_requester_is_revoked(
+    client, database, pending, analyst, moderator, moderator_headers, target
 ):
+    """Otherwise revoking the requester would block the target for good."""
     database.revoke(analyst.user_id)
     response = _decide(client, moderator_headers, pending, decision_body(pending, moderator))
+    assert response.status_code == 200, response.text
+    assert client.post("/v1/auth/login", json=login_body(client, target)).status_code == 403
+
+
+def test_system_accounts_cannot_be_revoked_through_the_api(
+    client, database, analyst, analyst_headers
+):
+    system = database.create_user(None, owner_type="system")
+    response = client.post(
+        "/v1/revocations", json=request_body(analyst, system.user_id), headers=analyst_headers
+    )
     assert response.status_code == 403
-    assert _state(database, pending["revocation_id"]) == (None, None)
+    assert response.json()["detail"] == "System accounts can only be revoked by the database operator"
+    assert _count(database, system.user_id) == 0
 
 
 # ---------------------------------------------------------------------------

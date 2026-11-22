@@ -18,13 +18,17 @@ DECLARE
     viewer_id uuid := gen_random_uuid();
     moderator_a uuid := gen_random_uuid();
     moderator_b uuid := gen_random_uuid();
+    analyst_b uuid := gen_random_uuid();
+    system_id uuid := gen_random_uuid();
     source_id_value uuid := gen_random_uuid();
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type) VALUES
         (analyst_id, decode(repeat('a1', 32), 'hex'), 'analyst', 'human'),
         (viewer_id, decode(repeat('a2', 32), 'hex'), 'viewer', 'human'),
         (moderator_a, decode(repeat('a3', 32), 'hex'), 'moderator', 'human'),
-        (moderator_b, decode(repeat('a4', 32), 'hex'), 'moderator', 'human');
+        (moderator_b, decode(repeat('a4', 32), 'hex'), 'moderator', 'human'),
+        (analyst_b, decode(repeat('a5', 32), 'hex'), 'analyst', 'human'),
+        (system_id, decode(repeat('a6', 32), 'hex'), NULL, 'system');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at, submitted_by_analyst_id, signature
@@ -35,6 +39,7 @@ BEGIN
     INSERT INTO pg_temp.t VALUES
         ('analyst', analyst_id), ('viewer', viewer_id),
         ('moderator_a', moderator_a), ('moderator_b', moderator_b),
+        ('analyst_b', analyst_b), ('system', system_id),
         ('source', source_id_value);
 END
 $$;
@@ -382,6 +387,87 @@ BEGIN
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'revocation of an already revoked target was accepted';
+    END IF;
+END
+$$;
+
+-- A request stays decidable after its requester is revoked, and the API's
+-- login (relic_app) cannot revoke a system account.
+DO $$
+DECLARE
+    rejected boolean;
+    orphan uuid;
+    rev_id uuid;
+    analyst uuid := (SELECT id FROM pg_temp.t WHERE name = 'analyst');
+    analyst_b uuid := (SELECT id FROM pg_temp.t WHERE name = 'analyst_b');
+    moderator_b uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_b');
+    sig bytea := decode(repeat('04', 64), 'hex');
+BEGIN
+    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    VALUES (analyst_b, 'source', (SELECT id FROM pg_temp.t WHERE name = 'source'), 'bad source', sig)
+    RETURNING revocation_id INTO orphan;
+
+    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    VALUES (analyst, 'user', analyst_b, 'requester revoked', sig)
+    RETURNING revocation_id INTO rev_id;
+    UPDATE revocation
+       SET moderator_id = moderator_b, decision = 'approved',
+           decided_at = clock_timestamp(), decision_signature = sig
+     WHERE revocation_id = rev_id;
+    IF NOT account_is_revoked(analyst_b) THEN
+        RAISE EXCEPTION 'requester revocation is not effective';
+    END IF;
+
+    UPDATE revocation
+       SET moderator_id = moderator_b, decision = 'approved',
+           decided_at = clock_timestamp(), decision_signature = sig
+     WHERE revocation_id = orphan;
+    IF (SELECT decision FROM revocation WHERE revocation_id = orphan) IS DISTINCT FROM 'approved' THEN
+        RAISE EXCEPTION 'request of a since-revoked Analyst could not be decided';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst_b, 'source', gen_random_uuid(), 'revoked requester', sig);
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'revoked Analyst could file a revocation request';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst, 'user', (SELECT id FROM pg_temp.t WHERE name = 'system'), 'worker', sig);
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'relic_app could request revocation of a system account';
+    END IF;
+END
+$$;
+RESET ROLE;
+
+-- The operator can still revoke a system account.
+SET ROLE relic_owner;
+DO $$
+DECLARE
+    rev_id uuid;
+    system_id uuid := (SELECT id FROM pg_temp.t WHERE name = 'system');
+    sig bytea := decode(repeat('05', 64), 'hex');
+BEGIN
+    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    VALUES ((SELECT id FROM pg_temp.t WHERE name = 'analyst'), 'user', system_id, 'worker key rotated', sig)
+    RETURNING revocation_id INTO rev_id;
+    UPDATE revocation
+       SET moderator_id = (SELECT id FROM pg_temp.t WHERE name = 'moderator_b'),
+           decision = 'approved', decided_at = clock_timestamp(), decision_signature = sig
+     WHERE revocation_id = rev_id;
+    IF NOT account_is_revoked(system_id) THEN
+        RAISE EXCEPTION 'operator could not revoke a system account';
     END IF;
 END
 $$;

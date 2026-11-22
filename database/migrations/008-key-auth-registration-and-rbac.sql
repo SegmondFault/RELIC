@@ -16,6 +16,10 @@
 --   decisions are final and timestamped by the database, a Moderator cannot
 --   decide a revocation of their own account, a target has at most one open
 --   request, and an already revoked target cannot be requested again.
+-- * The requester must be an active Analyst when filing, not when the request
+--   is decided, so revoking the requester cannot leave a request undecidable.
+-- * System accounts (integrity and MMR workers) can only be revoked by the
+--   database operator: revoking one stops admissions and checkpoints.
 -- * FIDBF, BSim and provenance submitters must be Analysts.
 -- * Signed evidence tables are no longer updatable by relic_app.
 
@@ -360,6 +364,66 @@ CREATE UNIQUE INDEX revocation_open_target_idx
     ON revocation (target_type, target_id)
     WHERE decision IS NULL;
 
+-- Replaces the schema v1 version, which re-checked the requester on every
+-- update: a request filed by an Analyst who was revoked afterwards could then
+-- never be decided, and the one-open-request rule below would block its
+-- target for good. The requester is checked once, when the request is filed;
+-- the deciding Moderator is checked whenever a decision is recorded.
+CREATE OR REPLACE FUNCTION validate_revocation_actors()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    requester_role account_role;
+    requester_owner account_owner_type;
+    moderator_role account_role;
+    moderator_owner account_owner_type;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT role, owner_type
+          INTO requester_role, requester_owner
+          FROM user_public
+         WHERE user_id = NEW.analyst_request_id;
+
+        IF NOT FOUND
+           OR requester_owner <> 'human'
+           OR requester_role <> 'analyst'
+           OR account_is_revoked(NEW.analyst_request_id) THEN
+            RAISE EXCEPTION 'Revocation requester must be an active Analyst'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+    END IF;
+
+    IF NEW.decision IS NOT NULL THEN
+        SELECT role, owner_type
+          INTO moderator_role, moderator_owner
+          FROM user_public
+         WHERE user_id = NEW.moderator_id;
+
+        IF NOT FOUND
+           OR moderator_owner <> 'human'
+           OR moderator_role <> 'moderator'
+           OR account_is_revoked(NEW.moderator_id) THEN
+            RAISE EXCEPTION 'Revocation decision requires an active Moderator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- relic_owner (and superusers) are the database operator.
+CREATE FUNCTION is_database_operator()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT pg_has_role(current_user, 'relic_owner', 'USAGE');
+$$;
+
 CREATE FUNCTION guard_revocation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -385,6 +449,15 @@ BEGIN
             RAISE EXCEPTION 'Target %.% is already revoked', NEW.target_type, NEW.target_id
                 USING ERRCODE = 'unique_violation';
         END IF;
+        IF NEW.target_type = 'user'
+           AND NOT is_database_operator()
+           AND EXISTS (
+               SELECT 1 FROM user_public
+                WHERE user_id = NEW.target_id AND owner_type = 'system'
+           ) THEN
+            RAISE EXCEPTION 'System accounts can only be revoked by the database operator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
         NEW.requested_at := clock_timestamp();
         RETURN NEW;
     END IF;
@@ -408,6 +481,15 @@ BEGIN
     IF NEW.decision IS NOT NULL THEN
         IF NEW.target_type = 'user' AND NEW.target_id = NEW.moderator_id THEN
             RAISE EXCEPTION 'A Moderator cannot decide the revocation of their own account'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        IF NEW.target_type = 'user'
+           AND NOT is_database_operator()
+           AND EXISTS (
+               SELECT 1 FROM user_public
+                WHERE user_id = NEW.target_id AND owner_type = 'system'
+           ) THEN
+            RAISE EXCEPTION 'System accounts can only be revoked by the database operator'
                 USING ERRCODE = 'insufficient_privilege';
         END IF;
         NEW.decided_at := clock_timestamp();

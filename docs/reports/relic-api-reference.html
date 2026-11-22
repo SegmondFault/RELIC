@@ -141,7 +141,7 @@ account stays visible, marked revoked.</p>
   <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
   <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Review and decide registrations</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Decide revocations (never their own)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Decide revocations (never their own; system accounts: operator only)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Sign integrity-chain entries and MMR checkpoints (workers)</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="muted small">outside API</td></tr>
 </table>
 <p class="small muted"><b>Roles are exclusive, not ranked:</b> a Moderator cannot submit corpus data and an Analyst cannot flag.
@@ -357,7 +357,7 @@ The Moderator signs those five stored fields plus <code>moderator_id · verdict<
   <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature · 409 already decided</td></tr>
   <tr><td>GET</td><td class="mono">/v1/revocations[/{id}]</td><td>logged in</td><td>requests and decisions with both signatures; filter <code>status</code>, <code>target_type</code>, <code>target_id</code></td></tr>
-  <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 pending · 200 identical retry · 403 bad signature · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 pending · 200 identical retry · 403 bad signature or system account (operator only) · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature or own account · 409 already decided; account revocation is immediate</td></tr>
 </table>
 <p class="small muted">All other catalogue, submission and flag routes listed in <code>database/api/README.md</code> require login and return <code>501</code> until their signed formats are implemented.</p>
@@ -381,7 +381,6 @@ The Moderator signs those five stored fields plus <code>moderator_id · verdict<
   <tr><th style="width:210px">Gap</th><th>Effect · direction</th></tr>
   <tr><td>One Moderator can act alone on Moderator powers</td><td>One Moderator can approve a Moderator registration, including their own second key, and decide the revocation of any other Moderator. A stolen Moderator key plus a fake Analyst can therefore remove honest Moderators. Deferred by decision; fix with two-Moderator approval or operator-only.</td></tr>
   <tr><td>No key rotation or recovery</td><td>Key = identity. A lost key means a new account; history is not linked. A compromised key can only be revoked, and only an Analyst can request that.</td></tr>
-  <tr><td>Orphaned revocation requests</td><td>If the requesting Analyst is revoked first, their open requests can no longer be decided and block that target until handled by the operator.</td></tr>
   <tr><td>Tokens cannot be revoked individually</td><td>No logout; a stolen token works up to 8 h unless the whole account is revoked. Writes still need the key.</td></tr>
   <tr><td>Rate limits are per IP, per process</td><td>IPv6 hosts own a /64; the table evicts old entries. Run one worker; limit IPv6 per /64 and cap open challenges.</td></tr>
   <tr><td>Registration hygiene</td><td>Rejected keys may reapply indefinitely; pending requests never expire; emails are not verified; request rows (with PII) can never be deleted.</td></tr>
@@ -396,7 +395,7 @@ scripts/local-dev.sh pending                           # list open requests
 scripts/local-dev.sh approve|reject REQUEST_ID ~/.ssh/mod   # logs in by key, signs, submits
 scripts/local-dev.sh revoke user TARGET_ID ~/.ssh/analyst "reason"
 scripts/local-dev.sh approve-revocation|reject-revocation REVOCATION_ID ~/.ssh/mod</pre>
-<p class="small muted">Client-side commands (generate a key, register, log in, request and decide revocations): <code>docs/authentication.md</code>, section “Client”.<br>Tests: <code>cd database/api &amp;&amp; RELIC_TEST_SUPERUSER_URL=postgresql://postgres:postgres@127.0.0.1:55432 pytest</code> (134 pass) and <code>cargo test --workspace</code>.
+<p class="small muted">Client-side commands (generate a key, register, log in, request and decide revocations): <code>docs/authentication.md</code>, section “Client”.<br>Tests: <code>cd database/api &amp;&amp; RELIC_TEST_SUPERUSER_URL=postgresql://postgres:postgres@127.0.0.1:55432 pytest</code> (135 pass) and <code>cargo test --workspace</code>.
 Full formats: <code>docs/authentication.md</code>. Endpoint catalogue: <code>database/api/README.md</code>.</p>
 
 </body>
