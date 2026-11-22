@@ -22,6 +22,11 @@
 --   database operator: revoking one stops admissions and checkpoints.
 -- * FIDBF, BSim and provenance submitters must be Analysts.
 -- * Signed evidence tables are no longer updatable by relic_app.
+-- * Flags and flag responses carry 64-byte Ed25519 signatures, a Viewer can
+--   flag a target once, revoked targets and revoked flags take no new flags
+--   or responses, and flag responses can themselves be flagged and revoked.
+-- * Foreign-key indexes used by filtered catalogue lists also cover the
+--   primary key, so each cursor page is a single index range scan.
 
 \set ON_ERROR_STOP on
 
@@ -504,6 +509,151 @@ BEFORE INSERT OR UPDATE OR DELETE ON revocation
 FOR EACH ROW EXECUTE FUNCTION guard_revocation();
 
 -- ---------------------------------------------------------------------------
+-- Flags and flag responses
+-- ---------------------------------------------------------------------------
+
+-- A flag response becomes a target, so an abusive response can be flagged
+-- and revoked like any other object. A new enum value can only be used after
+-- the transaction that adds it commits; nothing in this migration uses it.
+ALTER TYPE corpus_target_type ADD VALUE IF NOT EXISTS 'flag_response';
+
+-- Replaces the schema v1 version: adds flag_response.
+CREATE OR REPLACE FUNCTION target_exists(
+    candidate_type corpus_target_type,
+    candidate_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    RETURN CASE candidate_type
+        WHEN 'user' THEN EXISTS (
+            SELECT 1 FROM user_public WHERE user_id = candidate_id
+        )
+        WHEN 'source' THEN EXISTS (
+            SELECT 1 FROM source WHERE source_id = candidate_id
+        )
+        WHEN 'batch' THEN EXISTS (
+            SELECT 1 FROM batch WHERE batch_id = candidate_id
+        )
+        WHEN 'binary' THEN EXISTS (
+            SELECT 1 FROM binary_record WHERE binary_id = candidate_id
+        )
+        WHEN 'function' THEN EXISTS (
+            SELECT 1 FROM function_record WHERE function_id = candidate_id
+        )
+        WHEN 'fidbf' THEN EXISTS (
+            SELECT 1 FROM fidbf WHERE fidbf_id = candidate_id
+        )
+        WHEN 'bsim' THEN EXISTS (
+            SELECT 1 FROM bsim WHERE bsim_id = candidate_id
+        )
+        WHEN 'provenance' THEN EXISTS (
+            SELECT 1 FROM provenance WHERE provenance_id = candidate_id
+        )
+        WHEN 'license_assertion' THEN EXISTS (
+            SELECT 1 FROM license_assertion
+             WHERE license_assertion_id = candidate_id
+        )
+        WHEN 'software_component' THEN EXISTS (
+            SELECT 1 FROM software_component WHERE component_id = candidate_id
+        )
+        WHEN 'software_release' THEN EXISTS (
+            SELECT 1 FROM software_release
+             WHERE software_release_id = candidate_id
+        )
+        WHEN 'binary_component_assertion' THEN EXISTS (
+            SELECT 1 FROM binary_component_assertion
+             WHERE binary_component_assertion_id = candidate_id
+        )
+        WHEN 'behavioural_composition' THEN EXISTS (
+            SELECT 1 FROM behavioural_composition
+             WHERE behavioural_composition_id = candidate_id
+        )
+        WHEN 'classification' THEN EXISTS (
+            SELECT 1 FROM classification WHERE classification_id = candidate_id
+        )
+        WHEN 'flag' THEN EXISTS (
+            SELECT 1 FROM flag WHERE flag_id = candidate_id
+        )
+        WHEN 'flag_response' THEN EXISTS (
+            SELECT 1 FROM flag_response WHERE flag_response_id = candidate_id
+        )
+    END;
+END;
+$$;
+
+ALTER TABLE flag
+    ADD CONSTRAINT flag_signature_ed25519 CHECK (octet_length(signature) = 64);
+ALTER TABLE flag_response
+    ADD CONSTRAINT flag_response_signature_ed25519 CHECK (octet_length(signature) = 64);
+
+-- One flag per Viewer per target; follow-ups belong in responses or a
+-- revocation request. The API reports a second flag as 409.
+CREATE UNIQUE INDEX flag_one_per_viewer_target_idx
+    ON flag (viewer_request_id, target_type, target_id);
+
+CREATE FUNCTION target_is_revoked(
+    candidate_type corpus_target_type,
+    candidate_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM revocation
+         WHERE target_type = candidate_type
+           AND target_id = candidate_id
+           AND decision = 'approved'
+    );
+$$;
+
+-- A revoked target or flag leaves nothing to act on, so it takes no new flags
+-- or responses. created_at comes from the database clock, never the client.
+CREATE FUNCTION guard_flag()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_flag_response()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('flag', NEW.flag_id) THEN
+        RAISE EXCEPTION 'Flag % is revoked', NEW.flag_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the role and existence checks (triggers run in name order).
+CREATE TRIGGER flag_target_not_revoked
+BEFORE INSERT ON flag
+FOR EACH ROW EXECUTE FUNCTION guard_flag();
+
+CREATE TRIGGER flag_response_target_not_revoked
+BEFORE INSERT ON flag_response
+FOR EACH ROW EXECUTE FUNCTION guard_flag_response();
+
+-- ---------------------------------------------------------------------------
 -- Analyst-only corpus objects
 -- ---------------------------------------------------------------------------
 
@@ -522,6 +672,72 @@ FOR EACH ROW EXECUTE FUNCTION require_actor_role('submitted_by_user_id', 'analys
 CREATE TRIGGER provenance_requires_analyst
 BEFORE INSERT OR UPDATE ON provenance
 FOR EACH ROW EXECUTE FUNCTION require_actor_role('submitted_by_user_id', 'analyst');
+
+-- ---------------------------------------------------------------------------
+-- Catalogue read paging
+-- ---------------------------------------------------------------------------
+
+-- Filtered lists run WHERE <filter> = $1 AND <pk> > $cursor ORDER BY <pk>.
+-- With an index on <filter> alone, PostgreSQL either sorts every matching row
+-- for each page or walks the primary key and skips non-matching rows, which
+-- can read most of the table. An index on (<filter>, <pk>) serves each page
+-- as one range scan. It still serves foreign-key and equality lookups on
+-- <filter>, so it replaces the single-column index under the same name.
+-- Near-unique hash filters (sha256, md5) keep their single-column indexes.
+
+DROP INDEX binary_batch_id_idx;
+CREATE INDEX binary_batch_id_idx ON binary_record (batch_id, binary_id);
+DROP INDEX binary_source_id_idx;
+CREATE INDEX binary_source_id_idx ON binary_record (source_id, binary_id);
+
+DROP INDEX fidbf_binary_id_idx;
+CREATE INDEX fidbf_binary_id_idx ON fidbf (binary_id, fidbf_id);
+DROP INDEX fidbf_source_id_idx;
+CREATE INDEX fidbf_source_id_idx ON fidbf (source_id, fidbf_id);
+
+DROP INDEX function_binary_id_idx;
+CREATE INDEX function_binary_id_idx ON function_record (binary_id, function_id);
+DROP INDEX function_fidbf_id_idx;
+CREATE INDEX function_fidbf_id_idx ON function_record (fidbf_id, function_id);
+
+DROP INDEX bsim_source_id_idx;
+CREATE INDEX bsim_source_id_idx ON bsim (source_id, bsim_id);
+
+-- function_id lookups use UNIQUE (function_id, bsim_id); a function has few links.
+DROP INDEX function_bsim_binary_id_idx;
+CREATE INDEX function_bsim_binary_id_idx ON function_bsim (binary_id, function_bsim_id);
+DROP INDEX function_bsim_bsim_id_idx;
+CREATE INDEX function_bsim_bsim_id_idx ON function_bsim (bsim_id, function_bsim_id);
+
+DROP INDEX provenance_source_id_idx;
+CREATE INDEX provenance_source_id_idx ON provenance (source_id, provenance_id);
+DROP INDEX provenance_fidbf_id_idx;
+CREATE INDEX provenance_fidbf_id_idx ON provenance (fidbf_id, provenance_id);
+DROP INDEX provenance_bsim_id_idx;
+CREATE INDEX provenance_bsim_id_idx ON provenance (bsim_id, provenance_id);
+DROP INDEX provenance_binary_id_idx;
+CREATE INDEX provenance_binary_id_idx ON provenance (binary_id, provenance_id);
+
+DROP INDEX license_assertion_source_id_idx;
+CREATE INDEX license_assertion_source_id_idx
+    ON license_assertion (source_id, license_assertion_id)
+    WHERE source_id IS NOT NULL;
+DROP INDEX license_assertion_binary_id_idx;
+CREATE INDEX license_assertion_binary_id_idx
+    ON license_assertion (binary_id, license_assertion_id)
+    WHERE binary_id IS NOT NULL;
+
+DROP INDEX classification_target_idx;
+CREATE INDEX classification_target_idx
+    ON classification (target_type, target_id, classification_id);
+
+DROP INDEX flag_target_idx;
+CREATE INDEX flag_target_idx ON flag (target_type, target_id, flag_id);
+DROP INDEX flag_response_flag_id_idx;
+CREATE INDEX flag_response_flag_id_idx ON flag_response (flag_id, flag_response_id);
+
+DROP INDEX integrity_source_id_idx;
+CREATE INDEX integrity_source_id_idx ON integrity (source_id, integrity_id);
 
 -- ---------------------------------------------------------------------------
 -- Application privileges

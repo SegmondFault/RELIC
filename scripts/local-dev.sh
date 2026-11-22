@@ -14,6 +14,10 @@
 #                                                   revocation request
 #   scripts/local-dev.sh approve-revocation|reject-revocation <revocation_id> <moderator_key>
 #                                                   sign and submit a revocation decision
+#   scripts/local-dev.sh flag <target_type> <target_id> <viewer_key> <note>
+#                                                   log in as the Viewer, sign and submit a flag
+#   scripts/local-dev.sh respond-flag <flag_id> <analyst_key> <note>
+#                                                   sign and submit an Analyst's response
 #   scripts/local-dev.sh api                        run the API on http://127.0.0.1:8000 (foreground)
 #   scripts/local-dev.sh psql                       open psql on the dev database as superuser
 #   scripts/local-dev.sh down                       remove the Postgres container and its data
@@ -155,6 +159,44 @@ cmd_revoke() {
     echo
 }
 
+cmd_flag() {
+    (( $# == 4 )) || {
+        echo "usage: $0 flag <target_type> <target_id> <viewer_key> <note>" >&2; exit 2;
+    }
+    local target_type="$1" target_id="$2" key="$3" note="$4" token user_id
+    require_uuid "$target_id"
+    local work; work="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+
+    login_as "$key" "$work"
+    "$signer" flag --viewer-id "$user_id" --target-type "$target_type" \
+        --target-id "$target_id" --note "$note" --key "$key" > "$work/flag.json"
+    curl -sS --fail-with-body -X POST "$api/flags" \
+        -H "authorization: Bearer $token" -H 'content-type: application/json' \
+        -d @"$work/flag.json"
+    echo
+}
+
+cmd_respond_flag() {
+    (( $# == 3 )) || { echo "usage: $0 respond-flag <flag_id> <analyst_key> <note>" >&2; exit 2; }
+    local flag_id="$1" key="$2" note="$3" token user_id
+    require_uuid "$flag_id"
+    local work; work="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+
+    login_as "$key" "$work"
+    curl -sS --fail-with-body "$api/flags/$flag_id" \
+        -H "authorization: Bearer $token" > "$work/flag.json"
+    "$signer" respond-flag --flag "$work/flag.json" --analyst-id "$user_id" \
+        --note "$note" --key "$key" > "$work/response.json"
+    curl -sS --fail-with-body -X POST "$api/flags/$flag_id/responses" \
+        -H "authorization: Bearer $token" -H 'content-type: application/json' \
+        -d @"$work/response.json"
+    echo
+}
+
 cmd_api() {
     if [[ ! -x "$venv/bin/uvicorn" ]]; then
         python3 -m venv "$venv"
@@ -188,8 +230,10 @@ case "${1:-}" in
     revoke) shift; cmd_revoke "$@" ;;
     approve-revocation) shift; cmd_decide revocation approved "$@" ;;
     reject-revocation) shift; cmd_decide revocation rejected "$@" ;;
+    flag) shift; cmd_flag "$@" ;;
+    respond-flag) shift; cmd_respond_flag "$@" ;;
     api) cmd_api ;;
     psql) shift; psql --no-psqlrc "$super_uri/relic" "$@" ;;
     down) cmd_down ;;
-    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

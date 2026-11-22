@@ -22,7 +22,7 @@ from ..crypto import (
     revocation_request_record,
     verify,
 )
-from ..deps import ConnDep, Identity, current_identity, require_roles
+from ..deps import ConnDep, Identity, current_identity, registered_key, require_roles
 from ..schemas import (
     RevocationDecisionRequest,
     RevocationDecisionResponse,
@@ -56,13 +56,6 @@ _INSERT = f"""
     VALUES (%s, %s, %s::catalogue.corpus_target_type, %s, %s, %s)
     RETURNING {_COLUMNS}
 """
-
-
-async def _registered_key(conn: ConnDep, user_id: UUID) -> bytes:
-    cur = await conn.execute(
-        "SELECT public_key FROM catalogue.user_public WHERE user_id = %s", (user_id,)
-    )
-    return (await cur.fetchone())["public_key"]
 
 
 @router.get("/revocations", response_model=list[RevocationDetail])
@@ -133,7 +126,7 @@ async def request_revocation(
 
     async with conn.transaction():
         # The key registered for the claimed User ID, never one from the request.
-        key = await _registered_key(conn, body.analyst_id)
+        key = await registered_key(conn, body.analyst_id)
         if not verify(key, REVOCATION_REQUEST_SIGNATURE_DOMAIN, revocation_request_record(request), signature):
             audit.warning(
                 "revocation request signature rejected id=%s analyst=%s",
@@ -244,7 +237,7 @@ async def decide_revocation(
             request, moderator_id=moderator.user_id, decision=body.decision
         )
         signature = bytes.fromhex(body.signature)
-        key = await _registered_key(conn, moderator.user_id)
+        key = await registered_key(conn, moderator.user_id)
         if not verify(key, REVOCATION_DECISION_SIGNATURE_DOMAIN, record, signature):
             audit.warning(
                 "revocation decision signature rejected id=%s moderator=%s",

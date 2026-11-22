@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
@@ -148,6 +148,7 @@ TargetType = Literal[
     "behavioural_composition",
     "classification",
     "flag",
+    "flag_response",
 ]
 RevocationStatus = Literal["pending", "approved", "rejected"]
 Reason = Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(_clean_text)]
@@ -188,3 +189,249 @@ class RevocationDecisionResponse(BaseModel):
     revocation_id: UUID
     decision: Literal["approved", "rejected"]
     decided_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Catalogue reads
+#
+# Signatures and keys are lowercase hex; digests are returned exactly as
+# stored. NUMERIC(20,0) addresses and NUMERIC(5,4) confidences are decimal
+# strings so that no client loses precision. `revoked` is true when an
+# approved revocation targets this exact object (not its parents).
+# ---------------------------------------------------------------------------
+
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Md5 = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+Signature = Annotated[str, Field(description="Signature bytes, lowercase hex")]
+DecimalText = Annotated[str, Field(description="Exact decimal value as text")]
+
+
+class Source(BaseModel):
+    source_id: UUID
+    name: str
+    source_type: str
+    reference: str | None
+    snapshot_version: str | None
+    retrieved_at: datetime
+    is_ecological: bool | None
+    submitted_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class Batch(BaseModel):
+    batch_id: UUID
+    md5: str
+    content_sha256: str
+    created_at: datetime
+    analyst_user_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class Binary(BaseModel):
+    binary_id: UUID
+    batch_id: UUID
+    source_id: UUID
+    content_sha256: str
+    content_md5: str
+    size_bytes: int
+    original_filename: str | None
+    format: str | None
+    architecture: str | None
+    bit_width: int | None
+    endianness: str | None
+    platform: str | None
+    abi: str | None
+    object_type: str | None
+    entry_point: DecimalText | None
+    image_base: DecimalText | None
+    build_id: str | None
+    is_stripped: bool | None
+    compiler: str | None
+    version: str | None
+    created_at: datetime
+    created_by: UUID | None
+    revoked: bool
+
+
+class Function(BaseModel):
+    function_id: UUID
+    binary_id: UUID
+    fidbf_id: UUID | None
+    name: str | None
+    full_hash: str
+    specific_hash: str
+    file_offset: int | None
+    virtual_address: DecimalText | None
+    size_bytes: int | None
+    section_name: str | None
+    symbol_name: str | None
+    mangled_name: str | None
+    demangled_name: str | None
+    is_import: bool
+    is_export: bool
+    is_thunk: bool
+    revoked: bool
+
+
+class Fidbf(BaseModel):
+    """FIDBF metadata. The object itself is not served yet."""
+
+    fidbf_id: UUID
+    binary_id: UUID
+    source_id: UUID
+    sha256: str
+    md5: str
+    created_at: datetime
+    submitted_by_user_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class Bsim(BaseModel):
+    bsim_id: UUID
+    source_id: UUID
+    sha256: str
+    md5: str
+    created_at: datetime
+    submitted_by_user_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class BsimDetail(Bsim):
+    object_data: Any
+
+
+class FunctionBsim(BaseModel):
+    function_bsim_id: UUID
+    function_id: UUID
+    binary_id: UUID
+    bsim_id: UUID
+    created_at: datetime
+
+
+class Provenance(BaseModel):
+    provenance_id: UUID
+    source_id: UUID
+    fidbf_id: UUID | None
+    bsim_id: UUID | None
+    binary_id: UUID | None
+    schema_name: str | None
+    schema_version: str | None
+    sha256: str
+    md5: str
+    created_at: datetime
+    submitted_by_user_id: UUID
+    signature: Signature
+    has_object_data: bool = Field(description="False for legacy rows stored only externally")
+    revoked: bool
+
+
+class ProvenanceDetail(Provenance):
+    object_data: dict[str, Any] | None
+
+
+class LicenseAssertion(BaseModel):
+    license_assertion_id: UUID
+    source_id: UUID | None
+    binary_id: UUID | None
+    spdx_expression: str
+    basis: str
+    confidence: DecimalText | None
+    evidence_provenance_id: UUID | None
+    created_at: datetime
+    submitted_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+ClassificationTarget = Literal["binary", "function", "behavioural_composition"]
+
+
+class Classification(BaseModel):
+    classification_id: UUID
+    target_type: ClassificationTarget
+    target_id: UUID
+    label: str
+    confidence: DecimalText | None
+    analyst_id: UUID
+    misp_universe: str | None
+    misp_uuid: UUID | None
+    created_at: datetime
+    signature: Signature
+    revoked: bool
+
+
+class ClassificationDetail(Classification):
+    evidence: Any
+
+
+class Flag(BaseModel):
+    flag_id: UUID
+    viewer_id: UUID
+    target_type: TargetType
+    target_id: UUID
+    note: str
+    created_at: datetime
+    signature: Signature
+    revoked: bool
+
+
+class FlagResponse(BaseModel):
+    flag_response_id: UUID
+    flag_id: UUID
+    analyst_id: UUID
+    note: str
+    created_at: datetime
+    signature: Signature
+    revoked: bool
+
+
+# ---------------------------------------------------------------------------
+# Flag writes
+# ---------------------------------------------------------------------------
+
+Note = Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(_clean_text)]
+
+
+class FlagSubmission(_Request):
+    flag_id: UUID = Field(description="Chosen by the Viewer; makes the flag single-use")
+    viewer_id: UUID = Field(description="The flagging Viewer: must be the caller")
+    target_type: TargetType
+    target_id: UUID
+    note: Note
+    signature: HexSignature
+
+
+class FlagResponseSubmission(_Request):
+    flag_response_id: UUID = Field(description="Chosen by the Analyst; makes the response single-use")
+    analyst_id: UUID = Field(description="The responding Analyst: must be the caller")
+    note: Note
+    signature: HexSignature = Field(description="Over the flag as stored and this response")
+
+
+class IntegrityEntry(BaseModel):
+    integrity_id: int
+    source_id: UUID
+    source_type: str
+    record_hash: str
+    prev_hash: str | None = Field(description="NULL only for the genesis row")
+    chain_hash: str
+    format_version: int
+    created_at: datetime
+    system_uid: UUID
+    system_signature: Signature
+
+
+class MmrCheckpoint(BaseModel):
+    mmr_checkpoint_id: int
+    last_integrity_id: int
+    leaf_count: int
+    peaks: list[Any]
+    commitment: str
+    format_version: int
+    created_at: datetime
+    system_uid: UUID
+    system_signature: Signature

@@ -29,6 +29,10 @@ REVOCATION_REQUEST_RECORD_DOMAIN = b"RELIC:revocation-request:v1"
 REVOCATION_REQUEST_SIGNATURE_DOMAIN = b"RELIC:revocation-request-signature:v1"
 REVOCATION_DECISION_RECORD_DOMAIN = b"RELIC:revocation-decision:v1"
 REVOCATION_DECISION_SIGNATURE_DOMAIN = b"RELIC:revocation-decision-signature:v1"
+FLAG_RECORD_DOMAIN = b"RELIC:flag:v1"
+FLAG_SIGNATURE_DOMAIN = b"RELIC:flag-signature:v1"
+FLAG_RESPONSE_RECORD_DOMAIN = b"RELIC:flag-response:v1"
+FLAG_RESPONSE_SIGNATURE_DOMAIN = b"RELIC:flag-response-signature:v1"
 
 PUBLIC_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
@@ -156,6 +160,45 @@ def revocation_decision_record(
     return encode_fields(
         REVOCATION_DECISION_RECORD_DOMAIN,
         [*request._fields(), moderator_id.bytes, decision.encode("utf-8")],
+    )
+
+
+@dataclass(frozen=True)
+class Flag:
+    """A Viewer's flag on one catalogue object, account, flag or flag response."""
+
+    flag_id: UUID
+    viewer_id: UUID
+    target_type: str
+    target_id: UUID
+    note: str
+
+    def _fields(self) -> list[bytes]:
+        return [
+            self.flag_id.bytes,
+            self.viewer_id.bytes,
+            self.target_type.encode("utf-8"),
+            self.target_id.bytes,
+            self.note.encode("utf-8"),
+        ]
+
+
+def flag_record(flag: Flag) -> bytes:
+    return encode_fields(FLAG_RECORD_DOMAIN, flag._fields())
+
+
+def flag_response_record(
+    flag: Flag, *, flag_response_id: UUID, analyst_id: UUID, note: str
+) -> bytes:
+    """What an Analyst signs: their response ID, the flag as stored, who responds and the note."""
+    return encode_fields(
+        FLAG_RESPONSE_RECORD_DOMAIN,
+        [
+            flag_response_id.bytes,
+            *flag._fields(),
+            analyst_id.bytes,
+            note.encode("utf-8"),
+        ],
     )
 
 

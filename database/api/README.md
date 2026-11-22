@@ -73,30 +73,51 @@ overall. Exceeding them returns `429` with `Retry-After`.
 
 ### Catalogue (read)
 
-All `GET`, all *Any* role: a valid bearer token is required. Implemented so
-far: `/v1/users`, `/v1/users/{user_id}` and the revocation reads; the rest
-return `501`.
+All `GET`, all *Any* role: a valid bearer token is required. All routes below
+are implemented except `/v1/fidbf/{id}/download` (`501` until object storage is
+designed).
 
-| Path | Returns |
-|---|---|
-| `/v1/users`, `/v1/users/{user_id}` | Public identity: User ID, role, owner type, public key (hex), created-at and whether the account is revoked. Never name, email or organisation. |
-| `/v1/sources`, `/v1/sources/{id}` | Where binaries and objects came from, including the ecological/artificial flag. |
-| `/v1/batches`, `/v1/batches/{id}` | Signed batches covering binary and function records. |
-| `/v1/binaries`, `/v1/binaries/{id}` | Binary metadata and SHA-256/MD5. Binary bytes are never stored. |
-| `/v1/functions`, `/v1/functions/{id}` | Functions within a binary, with FID full/specific hashes. |
-| `/v1/fidbf`, `/v1/fidbf/{id}` | FIDBF object metadata: hashes, submitter, signature. |
-| `/v1/fidbf/{id}/download` | The FIDBF object itself. |
-| `/v1/bsim`, `/v1/bsim/{id}` | BSim similarity objects. |
-| `/v1/function-bsim` | Which functions each BSim object describes. |
-| `/v1/provenance`, `/v1/provenance/{id}` | OCSF-style provenance seals and build recipes. |
-| `/v1/license-assertions`, `/v1/license-assertions/{id}` | Signed SPDX licence claims on one source or one binary. |
-| `/v1/classifications`, `/v1/classifications/{id}` | Signed labels on binaries, functions or behavioural compositions. |
-| `/v1/flags`, `/v1/flags/{id}` | Viewer flags on catalogue objects. |
-| `/v1/flag-responses` | Analyst responses to flags. |
-| `/v1/revocations`, `/v1/revocations/{id}` | Revocation requests and moderator decisions (implemented, see Revocations). |
-| `/v1/integrity`, `/v1/integrity/{id}` | The append-only, system-signed integrity chain (integer IDs). |
-| `/v1/mmr-checkpoints`, `/v1/mmr-checkpoints/{id}` | Signed Merkle Mountain Range checkpoints over the chain (integer IDs). |
-| `/v1/mmr-checkpoints/latest` | The newest checkpoint. |
+**Conventions**
+
+- **Cursor paging.** Lists are ordered by primary key; request the next page
+  with `after=<last id of this page>` and `limit` (1–500, default 100). An
+  empty page is the end. No totals are returned. (`/v1/users`,
+  `/v1/registrations` and `/v1/revocations` still use `limit`/`offset`.)
+- **Encoding.** Signatures and keys are lowercase hex; digests exactly as
+  stored. `NUMERIC(20,0)` addresses (`entry_point`, `image_base`,
+  `virtual_address`) and `NUMERIC(5,4)` confidences are decimal **strings**,
+  so no client loses precision above 2^53.
+- **`revoked`** is `true` when an approved revocation targets that exact
+  object. It is not inherited: functions of a revoked FIDBF are not marked.
+- **Not returned:** internal `storage_path` values, ever. Large JSON
+  (`object_data` of BSim and provenance, classification `evidence`) only on
+  the single-object route; provenance lists show `has_object_data`.
+- Signatures are returned as stored and are **not re-verified** by these
+  routes; rows admitted before signature checks existed may hold placeholders.
+
+| Path | Filters | Returns |
+|---|---|---|
+| `/v1/users`, `/v1/users/{user_id}` | — | Public identity: User ID, role, owner type, public key (hex), created-at and whether the account is revoked. Never name, email or organisation. |
+| `/v1/sources`, `/v1/sources/{id}` | — | Where binaries and objects came from, including the ecological/artificial flag. |
+| `/v1/batches`, `/v1/batches/{id}` | — | Signed batches covering binary and function records. |
+| `/v1/binaries`, `/v1/binaries/{id}` | `batch_id`, `source_id`, `sha256`, `md5` | Binary metadata and SHA-256/MD5. Binary bytes are never stored. |
+| `/v1/functions`, `/v1/functions/{id}` | `binary_id`, `fidbf_id` | Functions within a binary, with FID full/specific hashes. |
+| `/v1/fidbf`, `/v1/fidbf/{id}` | `binary_id`, `source_id`, `sha256` | FIDBF object metadata: hashes, submitter, signature. |
+| `/v1/fidbf/{id}/download` | — | The FIDBF object itself (`501`). |
+| `/v1/bsim`, `/v1/bsim/{id}` | `source_id`, `sha256` | BSim similarity objects; `object_data` on `/{id}` only. |
+| `/v1/function-bsim` | `function_id`, `binary_id`, `bsim_id` | Which functions each BSim object describes. |
+| `/v1/provenance`, `/v1/provenance/{id}` | `source_id`, `fidbf_id`, `bsim_id`, `binary_id` | OCSF-style provenance seals; `object_data` on `/{id}` only. |
+| `/v1/license-assertions`, `/v1/license-assertions/{id}` | `source_id`, `binary_id` | Signed SPDX licence claims on one source or one binary. |
+| `/v1/classifications`, `/v1/classifications/{id}` | `target_type`, `target_id` | Signed labels on binaries, functions or behavioural compositions; `evidence` on `/{id}` only. |
+| `/v1/flags`, `/v1/flags/{id}` | `target_type`, `target_id` | Viewer flags on objects, accounts, flags or responses, in the exact shape `respond-flag` signs. |
+| `/v1/flag-responses`, `/v1/flag-responses/{id}` | `flag_id` | Analyst responses to flags. |
+| `/v1/revocations`, `/v1/revocations/{id}` | see Revocations | Revocation requests and moderator decisions. |
+| `/v1/integrity`, `/v1/integrity/{id}` | `source_id` | The append-only, system-signed integrity chain, in insertion order (integer IDs, `after` is an integer). |
+| `/v1/mmr-checkpoints`, `/v1/mmr-checkpoints/{id}` | — | Signed Merkle Mountain Range checkpoints over the chain (integer IDs). |
+| `/v1/mmr-checkpoints/latest` | — | The checkpoint covering the most integrity rows; `404` before the first. |
+
+Software components, releases, binary-component assertions and behavioural
+compositions have no read routes yet.
 
 ### Corpus submissions
 
@@ -118,8 +139,15 @@ returns the original result; the same ID with different content is a conflict.
 
 | Method | Path | Role | Description |
 |---|---|---|---|
-| `POST` | `/v1/flags` | Viewer · Signed | Flag any catalogue object with a note. |
-| `POST` | `/v1/flags/{flag_id}/responses` | Analyst · Signed | Respond to a flag. A flag can have many responses. |
+Implemented. Signed formats: [`docs/authentication.md`](../../docs/authentication.md#flag);
+`relic-sign-challenge flag` and `respond-flag` produce the bodies. A flag has
+no status: Analysts answer it, and act on it by requesting a revocation of its
+target (or of the flag). Flags and responses are append-only.
+
+| Method | Path | Role | Description |
+|---|---|---|---|
+| `POST` | `/v1/flags` | Viewer · Signed | `{flag_id, viewer_id, target_type, target_id, note, signature}`: flag a catalogue object, an account, a flag or a flag response. `viewer_id` must be the caller; `flag_id` is a fresh UUID chosen by the client. `201` created; `200` identical retry; `403` bad signature; `409` ID reused with other content, target already flagged by this Viewer, or target revoked; `422` unknown target. |
+| `POST` | `/v1/flags/{flag_id}/responses` | Analyst · Signed | `{flag_response_id, analyst_id, note, signature}`, signed over the flag as stored and the response. A flag can have many responses. `201`; `200` identical retry; `403` bad signature; `404` unknown flag; `409` ID reused with other content, or the flag is revoked. |
 
 ### Revocations
 

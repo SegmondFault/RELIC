@@ -148,6 +148,17 @@ def require_roles(*roles: str) -> Callable[[Identity], Awaitable[Identity]]:
     return dependency
 
 
+async def registered_key(conn: AsyncConnection, user_id: UUID) -> bytes:
+    """The Ed25519 key registered for ``user_id`` (an authenticated caller).
+
+    Signed requests are always verified with this key, never one from the request.
+    """
+    cur = await conn.execute(
+        "SELECT public_key FROM catalogue.user_public WHERE user_id = %s", (user_id,)
+    )
+    return (await cur.fetchone())["public_key"]
+
+
 global_rate_limit = rate_limit(
     "global", lambda request: request.app.state.settings.global_rate_limit_per_minute, 60
 )

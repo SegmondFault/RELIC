@@ -65,7 +65,7 @@
 </head>
 <body>
 
-<div class="kicker">RELIC · API reference · branch feature/api-endpoints-rbac · as of 22 Nov 2026</div>
+<div class="kicker">RELIC · API reference · as of 22 Nov 2026</div>
 <h1>How the RELIC API works</h1>
 <p class="lead">RELIC has no passwords. Every person and worker is an <b>Ed25519 public key</b> with one fixed role.
 You get an account by asking for one with your own key; a Moderator approves it with a signature. You log in by
@@ -135,10 +135,10 @@ account stays visible, marked revoked.</p>
 
 <table>
   <tr><th>Capability</th><th style="width:62px">Viewer</th><th style="width:62px">Analyst</th><th style="width:72px">Moderator</th><th style="width:62px">System</th><th style="width:70px">Status</th></tr>
-  <tr><td>Log in, read catalogue (<code>GET /v1/…</code>)</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">/users live</span></td></tr>
-  <tr><td>Flag a catalogue object</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Log in, read catalogue (<code>GET /v1/…</code>)</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Flag an object, account, flag or response (once per target)</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Submit sources, batches, FIDBF, BSim, provenance, licences, classifications</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
-  <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Review and decide registrations</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Decide revocations (never their own; system accounts: operator only)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
@@ -343,7 +343,11 @@ Changing any field means a new <code>v2</code> domain and new vectors, never edi
 <code>revocation_id</code> is the row's primary key, so a signed request is stored once (identical retry → 200).
 The Moderator signs those five stored fields plus <code>moderator_id · verdict</code> under
 <code>revocation-decision:v1</code> / <code>revocation-decision-signature:v1</code>. Both are verified with the
-<i>registered</i> key of the claimed User ID, which must be the caller.</p>
+<i>registered</i> key of the claimed User ID, which must be the caller.
+<b>Flags</b> work the same way: the Viewer signs <code>flag_id · viewer_id · target_type · target_id · note</code>
+under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's response signs
+<code>flag_response_id</code>, the five stored flag fields, <code>analyst_id · note</code> under
+<code>flag-response:v1</code> / <code>flag-response-signature:v1</code>.</p>
 
 <h2><span class="n">06</span>Endpoints that work today</h2>
 <table class="keep">
@@ -354,13 +358,16 @@ The Moderator signs those five stored fields plus <code>moderator_id · verdict<
   <tr><td>POST</td><td class="mono">/v1/accounts</td><td>anyone</td><td>202 pending request · 401 bad proof · 409 key already used</td></tr>
   <tr><td>GET</td><td class="mono">/v1/me</td><td>logged in</td><td>own User ID, role, owner type, public key</td></tr>
   <tr><td>GET</td><td class="mono">/v1/users[/{id}]</td><td>logged in</td><td>public identities; never name or email</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/&lt;resource&gt;<br>/v1/&lt;resource&gt;/{id}</td><td>logged in</td><td>Catalogue reads. <i>resource</i>: sources, batches, binaries, functions, fidbf, bsim, function-bsim, provenance, license-assertions, classifications, flags, flag-responses, integrity, mmr-checkpoints (also <code>/latest</code>). Lists page with <code>?after=&lt;last id&gt;</code>; signatures hex; 64-bit numbers as strings; <code>revoked</code> per object; no storage paths; large JSON only on <code>/{id}</code></td></tr>
   <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature · 409 already decided</td></tr>
   <tr><td>GET</td><td class="mono">/v1/revocations[/{id}]</td><td>logged in</td><td>requests and decisions with both signatures; filter <code>status</code>, <code>target_type</code>, <code>target_id</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 pending · 200 identical retry · 403 bad signature or system account (operator only) · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature or own account · 409 already decided; account revocation is immediate</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/flags</td><td>Viewer · signed</td><td>201 · 200 identical retry · 403 bad signature · 409 already flagged by you, target revoked or ID reused · 422 unknown target</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/flags/{id}/responses</td><td>Analyst · signed</td><td>201 · 200 identical retry · 403 bad signature · 404 unknown flag · 409 flag revoked or ID reused</td></tr>
 </table>
-<p class="small muted">All other catalogue, submission and flag routes listed in <code>database/api/README.md</code> require login and return <code>501</code> until their signed formats are implemented.</p>
+<p class="small muted">Submissions and <code>/v1/fidbf/{id}/download</code> require login and return <code>501</code>. Filters per route: <code>database/api/README.md</code>.</p>
 
 <h2><span class="n">07</span>Security layers, outside in</h2>
 <p>Each layer holds even if the one before it fails: Caddy and the app both set headers; the app and the database both check roles.</p>
@@ -379,24 +386,21 @@ The Moderator signs those five stored fields plus <code>moderator_id · verdict<
 <h3>Known gaps (as of 22 Nov 2026)</h3>
 <table class="keep">
   <tr><th style="width:210px">Gap</th><th>Effect · direction</th></tr>
-  <tr><td>One Moderator can act alone on Moderator powers</td><td>One Moderator can approve a Moderator registration, including their own second key, and decide the revocation of any other Moderator. A stolen Moderator key plus a fake Analyst can therefore remove honest Moderators. Deferred by decision; fix with two-Moderator approval or operator-only.</td></tr>
-  <tr><td>No key rotation or recovery</td><td>Key = identity. A lost key means a new account; history is not linked. A compromised key can only be revoked, and only an Analyst can request that.</td></tr>
-  <tr><td>Tokens cannot be revoked individually</td><td>No logout; a stolen token works up to 8 h unless the whole account is revoked. Writes still need the key.</td></tr>
-  <tr><td>Rate limits are per IP, per process</td><td>IPv6 hosts own a /64; the table evicts old entries. Run one worker; limit IPv6 per /64 and cap open challenges.</td></tr>
+  <tr><td>One Moderator acts alone</td><td>Can approve a Moderator (even their own second key) and decide other Moderators' revocations. Deferred; fix: two-Moderator approval.</td></tr>
+  <tr><td>No key rotation</td><td>Key = identity: a lost key means a new, unlinked account; a compromised key can only be revoked.</td></tr>
+  <tr><td>No per-token revocation</td><td>No logout; a stolen token works up to 8 h unless the account is revoked.</td></tr>
+  <tr><td>Per-IP, per-process limits</td><td>IPv6 hosts own a /64. Run one worker; limit per /64; cap open challenges.</td></tr>
+  <tr><td>Flag authors are public</td><td>Anyone sees who flagged what; kept so signatures stay verifiable.</td></tr>
   <tr><td>Registration hygiene</td><td>Rejected keys may reapply indefinitely; pending requests never expire; emails are not verified; request rows (with PII) can never be deleted.</td></tr>
 </table>
 
-<h2><span class="n">08</span>Try it locally</h2>
-<pre># throwaway Postgres (port 55433) + schema + migrations, API from source on 127.0.0.1:8000
-scripts/local-dev.sh up
-scripts/local-dev.sh bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
-scripts/local-dev.sh api                               # foreground; RELIC_DEV_API_PORT to change
-scripts/local-dev.sh pending                           # list open requests
-scripts/local-dev.sh approve|reject REQUEST_ID ~/.ssh/mod   # logs in by key, signs, submits
-scripts/local-dev.sh revoke user TARGET_ID ~/.ssh/analyst "reason"
-scripts/local-dev.sh approve-revocation|reject-revocation REVOCATION_ID ~/.ssh/mod</pre>
-<p class="small muted">Client-side commands (generate a key, register, log in, request and decide revocations): <code>docs/authentication.md</code>, section “Client”.<br>Tests: <code>cd database/api &amp;&amp; RELIC_TEST_SUPERUSER_URL=postgresql://postgres:postgres@127.0.0.1:55432 pytest</code> (135 pass) and <code>cargo test --workspace</code>.
-Full formats: <code>docs/authentication.md</code>. Endpoint catalogue: <code>database/api/README.md</code>.</p>
+<h2 style="margin-top:6px"><span class="n">08</span>Try it locally</h2>
+<pre style="margin-bottom:3px; padding:5px 10px">dev=scripts/local-dev.sh; $dev up; $dev api     # Postgres on :55433, API on :8000
+$dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
+$dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
+$dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
+$dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 206 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

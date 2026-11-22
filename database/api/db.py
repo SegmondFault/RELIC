@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Any, AsyncIterator, Mapping, Sequence
@@ -58,10 +57,12 @@ async def write_tx(conn: AsyncConnection) -> AsyncIterator[None]:
 
 
 def _clean(v: Any) -> Any:
+    # Same conventions as the routes: bytes as lowercase hex, and exact
+    # decimals as text (NUMERIC(20,0) exceeds JSON's safe integer range).
     if isinstance(v, (bytes, bytearray, memoryview)):
-        return base64.b64encode(bytes(v)).decode("ascii")
+        return bytes(v).hex()
     if isinstance(v, Decimal):
-        return int(v) if v == v.to_integral_value() else str(v)
+        return str(v)
     return v
 
 

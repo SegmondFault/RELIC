@@ -1,9 +1,10 @@
 //! Canonical account messages: login, registration proof-of-possession,
-//! registration decisions, and revocation requests and decisions.
+//! registration decisions, revocation requests and decisions, and flags and
+//! flag responses.
 //!
 //! Login and registration proofs are signed over a single-use server
-//! challenge. Decisions and revocation requests are single-use because the
-//! identifier they sign is unique and stored. The API
+//! challenge. Decisions, revocation requests, flags and flag responses are
+//! single-use because the identifier they sign is unique and stored. The API
 //! (Python) re-implements these exact encodings and is pinned to the test
 //! vectors in `tests/vectors/auth-v1.json`; changing any field, order,
 //! encoding or domain requires a new version and new vectors.
@@ -32,6 +33,15 @@ pub const REVOCATION_REQUEST_SIGNATURE_DOMAIN: &[u8] = b"RELIC:revocation-reques
 pub const REVOCATION_DECISION_RECORD_DOMAIN: &[u8] = b"RELIC:revocation-decision:v1";
 /// Signature domain for a Moderator's decision on a revocation request.
 pub const REVOCATION_DECISION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:revocation-decision-signature:v1";
+
+/// Record domain for a Viewer's flag on a catalogue object, account or flag.
+pub const FLAG_RECORD_DOMAIN: &[u8] = b"RELIC:flag:v1";
+/// Signature domain for a Viewer's flag.
+pub const FLAG_SIGNATURE_DOMAIN: &[u8] = b"RELIC:flag-signature:v1";
+/// Record domain for an Analyst's response to a flag.
+pub const FLAG_RESPONSE_RECORD_DOMAIN: &[u8] = b"RELIC:flag-response:v1";
+/// Signature domain for an Analyst's response to a flag.
+pub const FLAG_RESPONSE_SIGNATURE_DOMAIN: &[u8] = b"RELIC:flag-response-signature:v1";
 
 /// A Moderator's verdict on a pending registration or revocation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,4 +281,85 @@ pub fn revocation_decision_digest(
     decision: RevocationDecision,
 ) -> Digest32 {
     sha256(&revocation_decision_record(request, moderator_id, decision))
+}
+
+/// A Viewer's flag on one catalogue object, account, flag or flag response.
+///
+/// The Viewer chooses `flag_id` (a fresh UUID). It is the primary key of the
+/// stored row, so a signed flag can be admitted at most once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Flag<'a> {
+    pub flag_id: &'a [u8; 16],
+    /// The flagging Viewer's User ID.
+    pub viewer_id: &'a [u8; 16],
+    /// A `corpus_target_type` value, e.g. `binary` or `user`.
+    pub target_type: &'a str,
+    pub target_id: &'a [u8; 16],
+    pub note: &'a str,
+}
+
+fn flag_fields<'a>(flag: &Flag<'a>) -> [&'a [u8]; 5] {
+    [
+        flag.flag_id,
+        flag.viewer_id,
+        flag.target_type.as_bytes(),
+        flag.target_id,
+        flag.note.as_bytes(),
+    ]
+}
+
+/// Canonical bytes of a Viewer's flag.
+#[must_use]
+pub fn flag_record(flag: &Flag<'_>) -> Vec<u8> {
+    encode_fields(FLAG_RECORD_DOMAIN, &flag_fields(flag))
+}
+
+/// Digest signed under [`FLAG_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn flag_digest(flag: &Flag<'_>) -> Digest32 {
+    sha256(&flag_record(flag))
+}
+
+/// Canonical bytes of an Analyst's response to a flag.
+///
+/// Binds the Analyst's chosen `flag_response_id`, every field of the flag as
+/// stored, the responding Analyst and their note, so the response attests
+/// exactly what was answered and can be checked from the two rows alone.
+#[must_use]
+pub fn flag_response_record(
+    flag: &Flag<'_>,
+    flag_response_id: &[u8; 16],
+    analyst_id: &[u8; 16],
+    note: &str,
+) -> Vec<u8> {
+    let [flag_id, viewer_id, target_type, target_id, flag_note] = flag_fields(flag);
+    encode_fields(
+        FLAG_RESPONSE_RECORD_DOMAIN,
+        &[
+            flag_response_id,
+            flag_id,
+            viewer_id,
+            target_type,
+            target_id,
+            flag_note,
+            analyst_id,
+            note.as_bytes(),
+        ],
+    )
+}
+
+/// Digest signed under [`FLAG_RESPONSE_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn flag_response_digest(
+    flag: &Flag<'_>,
+    flag_response_id: &[u8; 16],
+    analyst_id: &[u8; 16],
+    note: &str,
+) -> Digest32 {
+    sha256(&flag_response_record(
+        flag,
+        flag_response_id,
+        analyst_id,
+        note,
+    ))
 }

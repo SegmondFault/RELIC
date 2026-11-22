@@ -122,6 +122,49 @@ fn revocation_vectors(
     (revocation_requests, revocation_decisions)
 }
 
+/// One signed flag and one signed response to it.
+fn flag_vectors() -> (Vec<Value>, Vec<Value>) {
+    let flag_id = *b"\x0e\x6d\x2a\x71\x8c\x15\x4b\x39\x9a\x52\x1f\xc0\x33\x87\xe4\x6b";
+    let viewer_id = *b"\x2f\x90\x4c\x1b\x67\xa8\x4e\x02\xb5\x3d\x7c\x19\xe6\x40\x8a\x5d";
+    let target_id = *b"\xa1\x37\x5e\x08\xd4\x6c\x41\x9f\x83\x2b\x90\x4e\x17\xf5\x6a\xc2";
+    let response_id = *b"\x63\xb8\x19\xe2\x45\x0d\x4a\x76\x9c\x31\x58\xaf\x02\xd7\x6e\x94";
+    let analyst_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
+    let flag = auth::Flag {
+        flag_id: &flag_id,
+        viewer_id: &viewer_id,
+        target_type: "binary",
+        target_id: &target_id,
+        note: "Wrong licence — falsche Lizenz",
+    };
+    let flag_json = json!({
+        "flag_id": hex(&flag_id),
+        "viewer_id": hex(&viewer_id),
+        "target_type": flag.target_type,
+        "target_id": hex(&target_id),
+        "note": flag.note,
+    });
+    let flags = vec![signed_case(
+        "flag",
+        [0x66; 32],
+        &auth::flag_record(&flag),
+        auth::FLAG_SIGNATURE_DOMAIN,
+        flag_json.clone(),
+    )];
+    let note = "Checked: licence corrected";
+    let mut inputs = flag_json;
+    inputs["flag_response_id"] = json!(hex(&response_id));
+    inputs["analyst_id"] = json!(hex(&analyst_id));
+    inputs["response_note"] = json!(note);
+    let responses = vec![signed_case(
+        "flag-response",
+        [0x55; 32],
+        &auth::flag_response_record(&flag, &response_id, &analyst_id, note),
+        auth::FLAG_RESPONSE_SIGNATURE_DOMAIN,
+        inputs,
+    )];
+    (flags, responses)
+}
+
 fn build_vectors() -> Value {
     let challenge = challenge();
 
@@ -220,8 +263,12 @@ fn build_vectors() -> Value {
     let (revocation_requests, revocation_decisions) =
         revocation_vectors(&moderator_id, moderator_seed);
 
+    let (flags, flag_responses) = flag_vectors();
+
     json!({
         "format": "relic-auth-vectors/1",
+        "flag": flags,
+        "flag_response": flag_responses,
         "registration_decision": decisions,
         "revocation_request": revocation_requests,
         "revocation_decision": revocation_decisions,

@@ -1,4 +1,4 @@
-# Authentication, registration and revocation
+# Authentication, registration, revocation and flags
 
 RELIC has no passwords. Every human account is an Ed25519 public key, and
 authentication is proof of possession of the matching private key over a
@@ -144,6 +144,42 @@ forbids a Moderator deciding the revocation of their own account, sets
 `decided_at` from its own clock, and makes the decision final. Anyone logged in
 can read revocations and re-verify both signatures from the row.
 
+### Flag
+
+- `D = RELIC:flag:v1`, `S = RELIC:flag-signature:v1`
+- fields: `flag_id`, `viewer_id` (both UUID bytes), `target_type`
+  (a `corpus_target_type` value), `target_id`, `note`
+- `POST /v1/flags` with those values plus `signature`
+
+Only an active Viewer can flag, and `viewer_id` must be the caller; the API
+verifies with the key registered for `viewer_id`. As with revocation requests,
+the Viewer chooses `flag_id` and signs it, so a flag is stored at most once: an
+identical retry is `200`, the same ID with different content `409`.
+
+Anything can be flagged: a catalogue object, an account, another flag or a
+flag response (Viewers cannot request revocations, so a flag is how they report
+an account or an abusive flag). The database allows one flag per Viewer and
+target (`409`), refuses a flag on a revoked target (`409`) and on an unknown
+one (`422`), and sets `created_at` from its own clock. A flag has no status:
+Analysts answer it with responses, and act on it by requesting a revocation of
+its target, or of the flag itself.
+
+### Flag response
+
+- `D = RELIC:flag-response:v1`, `S = RELIC:flag-response-signature:v1`
+- fields: `flag_response_id`, then the five flag fields as stored, then
+  `analyst_id` and the response `note`
+- `POST /v1/flags/{flag_id}/responses` with
+  `{flag_response_id, analyst_id, note, signature}`
+
+Only an active Analyst can respond, and `analyst_id` must be the caller. The
+Analyst signs the flag exactly as read from `GET /v1/flags/{id}`, so the
+response attests what was answered; the API verifies it over the stored flag.
+A flag can have many responses. A revoked flag takes no new responses (`409`).
+A response can itself be flagged and revoked (`target_type = flag_response`).
+Anyone logged in can read flags and responses and re-verify both signatures
+from the two rows.
+
 ## Client
 
 Generate a key used only for RELIC, and build the signer:
@@ -222,4 +258,29 @@ target/release/relic-sign-challenge decide-revocation --request revocation.json 
 curl -s -X POST https://$HOST/v1/revocations/$REVOCATION_ID/decision \
      -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
      -d @decision.json
+```
+
+**Flag** (Viewer; `$VIEWER_ID` from `/v1/me`). Resending the printed body
+unchanged is a safe retry:
+
+```bash
+target/release/relic-sign-challenge flag --viewer-id "$VIEWER_ID" \
+     --target-type binary --target-id "$BINARY_ID" --note "Licence looks wrong" \
+     --key ~/.ssh/relic_ed25519 > flag.json
+curl -s -X POST https://$HOST/v1/flags \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @flag.json
+```
+
+**Respond to a flag** (Analyst). The tool prints the flag it is answering on
+stderr and refuses a revoked flag:
+
+```bash
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/flags/$FLAG_ID > flag.json
+target/release/relic-sign-challenge respond-flag --flag flag.json \
+     --analyst-id "$ANALYST_ID" --note "Checked, licence corrected" \
+     --key ~/.ssh/relic_ed25519 > response.json
+curl -s -X POST https://$HOST/v1/flags/$FLAG_ID/responses \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @response.json
 ```

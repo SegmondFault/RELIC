@@ -3,7 +3,8 @@
 //! `login` and `register` read a challenge exactly as returned by
 //! `POST /v1/auth/challenge`; `decide-registration` and `decide-revocation`
 //! read a request exactly as returned by `GET /v1/registrations/{id}` and
-//! `GET /v1/revocations/{id}`; `request-revocation` takes its fields as
+//! `GET /v1/revocations/{id}`, and `respond-flag` reads a flag as returned by
+//! `GET /v1/flags/{id}`; `request-revocation` and `flag` take their fields as
 //! arguments. Each signs the canonical message with the user's OpenSSH Ed25519
 //! key and prints the JSON body to POST.
 
@@ -16,7 +17,7 @@ use std::{
 use clap::{Args, Parser, Subcommand};
 use relic_crypto::{
     SystemSigner,
-    auth::{self, AuthChallenge, Decision, RegistrationDetails, RevocationRequest},
+    auth::{self, AuthChallenge, Decision, Flag, RegistrationDetails, RevocationRequest},
     read_secret_file,
 };
 use serde::Deserialize;
@@ -24,7 +25,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(about = "Sign RELIC login, registration and revocation messages on the user's machine")]
+#[command(
+    about = "Sign RELIC login, registration, revocation and flag messages on the user's machine"
+)]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -96,10 +99,43 @@ enum Command {
         #[command(flatten)]
         key: KeyArgs,
     },
+    /// Sign a Viewer's flag on a catalogue object, account, flag or response.
+    Flag {
+        /// The flagging Viewer's own User ID.
+        #[arg(long)]
+        viewer_id: Uuid,
+        #[arg(long, value_parser = TARGET_TYPES)]
+        target_type: String,
+        #[arg(long)]
+        target_id: Uuid,
+        #[arg(long)]
+        note: String,
+        /// Flag ID; a fresh random UUID if omitted. Reuse it to retry.
+        #[arg(long)]
+        flag_id: Option<Uuid>,
+        #[command(flatten)]
+        key: KeyArgs,
+    },
+    /// Sign an Analyst's response to a flag.
+    RespondFlag {
+        /// Flag JSON returned by `GET /v1/flags/{id}`.
+        #[arg(long)]
+        flag: PathBuf,
+        /// The responding Analyst's own User ID.
+        #[arg(long)]
+        analyst_id: Uuid,
+        #[arg(long)]
+        note: String,
+        /// Response ID; a fresh random UUID if omitted. Reuse it to retry.
+        #[arg(long)]
+        flag_response_id: Option<Uuid>,
+        #[command(flatten)]
+        key: KeyArgs,
+    },
 }
 
 /// `catalogue.corpus_target_type`.
-const TARGET_TYPES: [&str; 15] = [
+const TARGET_TYPES: [&str; 16] = [
     "user",
     "source",
     "batch",
@@ -115,6 +151,7 @@ const TARGET_TYPES: [&str; 15] = [
     "behavioural_composition",
     "classification",
     "flag",
+    "flag_response",
 ];
 
 #[derive(Debug, Args)]
@@ -155,6 +192,16 @@ struct RevocationFile {
     target_type: String,
     target_id: Uuid,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlagFile {
+    flag_id: Uuid,
+    viewer_id: Uuid,
+    target_type: String,
+    target_id: Uuid,
+    note: String,
+    revoked: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,51 +258,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             moderator_id,
             decision,
             key,
-        } => {
-            let file: RegistrationFile = serde_json::from_slice(&fs::read(&request)?)?;
-            if file.status != "pending" {
-                return Err(format!("request is already {}", file.status).into());
-            }
-            let public_key: [u8; 32] = unhex(&file.public_key)?
-                .try_into()
-                .map_err(|_| "applicant public key must be 32 bytes")?;
-            let verdict = parse_decision(&decision);
-            let details = RegistrationDetails {
-                public_key: &public_key,
-                requested_role: &file.requested_role,
-                name: &file.name,
-                organisation: file.organisation.as_deref(),
-                email: &file.email,
-            };
-            // Show exactly what is being signed before signing it.
-            eprintln!(
-                "Signing: {} registration {} for {} <{}>{} as {}, key {}",
-                verdict.as_str(),
-                file.registration_request_id,
-                file.name,
-                file.email,
-                file.organisation
-                    .as_deref()
-                    .map(|org| format!(" ({org})"))
-                    .unwrap_or_default(),
-                file.requested_role,
-                file.public_key,
-            );
-            let signer = load_key(&key)?;
-            let digest = auth::registration_decision_digest(
-                file.registration_request_id.as_bytes(),
-                &details,
-                moderator_id.as_bytes(),
-                verdict,
-            );
-            let signature =
-                signer.sign_digest(auth::REGISTRATION_DECISION_SIGNATURE_DOMAIN, &digest);
-            json!({
-                "moderator_id": moderator_id,
-                "decision": verdict.as_str(),
-                "signature": hex(&signature),
-            })
-        }
+        } => decide_registration(&request, moderator_id, parse_decision(&decision), &key)?,
         Command::RequestRevocation {
             analyst_id,
             target_type,
@@ -277,9 +280,89 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             decision,
             key,
         } => decide_revocation(&request, moderator_id, parse_decision(&decision), &key)?,
+        Command::Flag {
+            viewer_id,
+            target_type,
+            target_id,
+            note,
+            flag_id,
+            key,
+        } => flag(
+            &Flag {
+                flag_id: flag_id.unwrap_or_else(Uuid::new_v4).as_bytes(),
+                viewer_id: viewer_id.as_bytes(),
+                target_type: &target_type,
+                target_id: target_id.as_bytes(),
+                note: &note,
+            },
+            &key,
+        )?,
+        Command::RespondFlag {
+            flag,
+            analyst_id,
+            note,
+            flag_response_id,
+            key,
+        } => respond_flag(
+            &flag,
+            flag_response_id.unwrap_or_else(Uuid::new_v4),
+            analyst_id,
+            &note,
+            &key,
+        )?,
     };
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
+}
+
+/// Body for `POST /v1/registrations/{id}/decision`, signed over the request as stored.
+fn decide_registration(
+    request: &Path,
+    moderator_id: Uuid,
+    verdict: Decision,
+    key: &KeyArgs,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let file: RegistrationFile = serde_json::from_slice(&fs::read(request)?)?;
+    if file.status != "pending" {
+        return Err(format!("request is already {}", file.status).into());
+    }
+    let public_key: [u8; 32] = unhex(&file.public_key)?
+        .try_into()
+        .map_err(|_| "applicant public key must be 32 bytes")?;
+    let details = RegistrationDetails {
+        public_key: &public_key,
+        requested_role: &file.requested_role,
+        name: &file.name,
+        organisation: file.organisation.as_deref(),
+        email: &file.email,
+    };
+    // Show exactly what is being signed before signing it.
+    eprintln!(
+        "Signing: {} registration {} for {} <{}>{} as {}, key {}",
+        verdict.as_str(),
+        file.registration_request_id,
+        file.name,
+        file.email,
+        file.organisation
+            .as_deref()
+            .map(|org| format!(" ({org})"))
+            .unwrap_or_default(),
+        file.requested_role,
+        file.public_key,
+    );
+    let signer = load_key(key)?;
+    let digest = auth::registration_decision_digest(
+        file.registration_request_id.as_bytes(),
+        &details,
+        moderator_id.as_bytes(),
+        verdict,
+    );
+    let signature = signer.sign_digest(auth::REGISTRATION_DECISION_SIGNATURE_DOMAIN, &digest);
+    Ok(json!({
+        "moderator_id": moderator_id,
+        "decision": verdict.as_str(),
+        "signature": hex(&signature),
+    }))
 }
 
 /// Body for `POST /v1/revocations`.
@@ -346,6 +429,66 @@ fn decide_revocation(
     Ok(json!({
         "moderator_id": moderator_id,
         "decision": verdict.as_str(),
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/flags`.
+fn flag(flag: &Flag<'_>, key: &KeyArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let flag_id = Uuid::from_bytes(*flag.flag_id);
+    let target_id = Uuid::from_bytes(*flag.target_id);
+    eprintln!(
+        "Signing: flag {flag_id} on {} {target_id}",
+        flag.target_type
+    );
+    let signer = load_key(key)?;
+    let signature = signer.sign_digest(auth::FLAG_SIGNATURE_DOMAIN, &auth::flag_digest(flag));
+    Ok(json!({
+        "flag_id": flag_id,
+        "viewer_id": Uuid::from_bytes(*flag.viewer_id),
+        "target_type": flag.target_type,
+        "target_id": target_id,
+        "note": flag.note,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/flags/{id}/responses`, signed over the flag as stored.
+fn respond_flag(
+    flag: &Path,
+    flag_response_id: Uuid,
+    analyst_id: Uuid,
+    note: &str,
+    key: &KeyArgs,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let file: FlagFile = serde_json::from_slice(&fs::read(flag)?)?;
+    if file.revoked {
+        return Err("flag is revoked".into());
+    }
+    let stored = Flag {
+        flag_id: file.flag_id.as_bytes(),
+        viewer_id: file.viewer_id.as_bytes(),
+        target_type: &file.target_type,
+        target_id: file.target_id.as_bytes(),
+        note: &file.note,
+    };
+    // Show exactly what is being answered before signing it.
+    eprintln!(
+        "Signing: response {flag_response_id} to flag {} on {} {} by {}: {}",
+        file.flag_id, file.target_type, file.target_id, file.viewer_id, file.note,
+    );
+    let signer = load_key(key)?;
+    let digest = auth::flag_response_digest(
+        &stored,
+        flag_response_id.as_bytes(),
+        analyst_id.as_bytes(),
+        note,
+    );
+    let signature = signer.sign_digest(auth::FLAG_RESPONSE_SIGNATURE_DOMAIN, &digest);
+    Ok(json!({
+        "flag_response_id": flag_response_id,
+        "analyst_id": analyst_id,
+        "note": note,
         "signature": hex(&signature),
     }))
 }
