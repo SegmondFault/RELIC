@@ -79,8 +79,12 @@ pub fn encode_optional(value: Option<&str>) -> Vec<u8> {
 }
 
 /// Canonical login record bytes.
+///
+/// The client names itself by its Ed25519 public key; public keys are unique
+/// across all accounts, so the server resolves the account after verifying
+/// the signature with exactly this key.
 #[must_use]
-pub fn login_record(challenge: &AuthChallenge, user_id: &[u8; 16]) -> Vec<u8> {
+pub fn login_record(challenge: &AuthChallenge, public_key: &[u8; 32]) -> Vec<u8> {
     encode_fields(
         LOGIN_RECORD_DOMAIN,
         &[
@@ -88,15 +92,15 @@ pub fn login_record(challenge: &AuthChallenge, user_id: &[u8; 16]) -> Vec<u8> {
             &challenge.nonce,
             challenge.audience.as_bytes(),
             &challenge.expires_at_unix_micros.to_be_bytes(),
-            user_id,
+            public_key,
         ],
     )
 }
 
 /// Digest signed under [`LOGIN_SIGNATURE_DOMAIN`].
 #[must_use]
-pub fn login_digest(challenge: &AuthChallenge, user_id: &[u8; 16]) -> Digest32 {
-    sha256(&login_record(challenge, user_id))
+pub fn login_digest(challenge: &AuthChallenge, public_key: &[u8; 32]) -> Digest32 {
+    sha256(&login_record(challenge, public_key))
 }
 
 /// Canonical registration record bytes.

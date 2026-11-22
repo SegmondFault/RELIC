@@ -59,7 +59,9 @@ def test_encode_fields(case):
 @pytest.mark.parametrize("case", VECTORS["login"], ids=lambda case: case["name"])
 def test_login_vectors(case):
     inputs = case["inputs"]
-    record = crypto.login_record(_challenge(inputs["challenge"]), uuid.UUID(hex=inputs["user_id"]))
+    record = crypto.login_record(
+        _challenge(inputs["challenge"]), bytes.fromhex(case["public_key"])
+    )
     _check_signed_case(case, record, crypto.LOGIN_SIGNATURE_DOMAIN)
 
 

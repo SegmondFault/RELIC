@@ -40,7 +40,6 @@ async def request_account(body: RegistrationRequest, settings: SettingsDep, conn
         challenge_id=body.challenge_id,
         purpose="registration",
         audience=settings.audience,
-        claimed_user_id=None,
     )
     public_key = bytes.fromhex(body.public_key)
     signature = bytes.fromhex(body.signature)

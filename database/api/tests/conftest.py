@@ -122,19 +122,25 @@ def sign(key: SigningKey, domain: bytes, record: bytes) -> str:
     return key.sign(signing_message(domain, digest)).signature.hex()
 
 
-def login_body(client: TestClient, user: User, *, signer: SigningKey | None = None) -> dict:
-    response = client.post(
-        "/v1/auth/challenge", json={"purpose": "login", "user_id": str(user.user_id)}
-    )
+def key_login_body(
+    client: TestClient, key: SigningKey, *, signer: SigningKey | None = None
+) -> dict:
+    """A login request naming ``key``, signed by ``signer`` (default: ``key``)."""
+    response = client.post("/v1/auth/challenge", json={"purpose": "login"})
     assert response.status_code == 201, response.text
     challenge = challenge_from(response.json())
+    public_key = bytes(key.verify_key)
     return {
         "challenge_id": str(challenge.challenge_id),
-        "user_id": str(user.user_id),
+        "public_key": public_key.hex(),
         "signature": sign(
-            signer or user.key, LOGIN_SIGNATURE_DOMAIN, login_record(challenge, user.user_id)
+            signer or key, LOGIN_SIGNATURE_DOMAIN, login_record(challenge, public_key)
         ),
     }
+
+
+def login_body(client: TestClient, user: User, *, signer: SigningKey | None = None) -> dict:
+    return key_login_body(client, user.key, signer=signer)
 
 
 def login(client: TestClient, user: User) -> str:

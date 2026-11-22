@@ -88,13 +88,15 @@ class Identity:
     created_at: datetime
 
 
-IDENTITY_QUERY = """
+_IDENTITY_COLUMNS = """
     SELECT user_id, role::text AS role, owner_type::text AS owner_type,
            encode(public_key, 'hex') AS public_key, created_at,
            catalogue.account_is_revoked(user_id) AS revoked
       FROM catalogue.user_public
-     WHERE user_id = %s
 """
+IDENTITY_QUERY = _IDENTITY_COLUMNS + " WHERE user_id = %s"
+# Public keys are unique across all accounts (user_public_public_key_idx).
+IDENTITY_BY_KEY_QUERY = _IDENTITY_COLUMNS + " WHERE public_key = %s"
 
 
 async def token_subject(

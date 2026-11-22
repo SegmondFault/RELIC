@@ -4,8 +4,9 @@
 -- Applies on top of relic-schema-v1.sql + relic-access-v1.sql (fresh install)
 -- and on top of migration 007 (upgraded server).
 --
--- * Login proves possession of the registered Ed25519 key by signing a
---   single-use server challenge. Passwords are no longer required.
+-- * Login proves possession of a registered Ed25519 key by signing a
+--   single-use server challenge. The client identifies itself by its public
+--   key (unique across all accounts); no User ID or password is needed.
 -- * Registrations stay pending outside user_public until an active Moderator
 --   decides them. Approval is the only path for relic_app to create a human
 --   account; system accounts and the first Moderator are created by the
@@ -73,15 +74,14 @@ CREATE TYPE auth_challenge_purpose AS ENUM (
 CREATE TABLE auth_challenge (
     challenge_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     purpose auth_challenge_purpose NOT NULL,
+    -- Deliberately bound to no account: issuing a challenge reveals nothing
+    -- about which keys or accounts exist. The signed login record names the
+    -- public key instead.
     nonce bytea NOT NULL UNIQUE CHECK (octet_length(nonce) = 32),
-    -- Claimed, not verified: deliberately no foreign key so issuing a login
-    -- challenge does not reveal whether an account exists.
-    claimed_user_id uuid,
     audience text NOT NULL CHECK (btrim(audience) <> ''),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at timestamptz NOT NULL,
     consumed_at timestamptz,
-    CHECK ((purpose = 'login') = (claimed_user_id IS NOT NULL)),
     CHECK (expires_at > created_at),
     CHECK (expires_at <= created_at + interval '10 minutes'),
     CHECK (consumed_at IS NULL OR consumed_at >= created_at)
@@ -120,7 +120,6 @@ BEGIN
     IF NEW.challenge_id <> OLD.challenge_id
        OR NEW.purpose <> OLD.purpose
        OR NEW.nonce <> OLD.nonce
-       OR NEW.claimed_user_id IS DISTINCT FROM OLD.claimed_user_id
        OR NEW.audience <> OLD.audience
        OR NEW.created_at <> OLD.created_at
        OR NEW.expires_at <> OLD.expires_at THEN

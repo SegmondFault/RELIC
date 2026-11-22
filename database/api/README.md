@@ -54,8 +54,8 @@ key by signing a single-use server challenge; message formats are specified in
 
 | Method | Path | Role | Description |
 |---|---|---|---|
-| `POST` | `/v1/auth/challenge` | none | Issue a single-use challenge (`purpose`: `login` with a `user_id`, or `registration`). Expires after `RELIC_CHALLENGE_TTL_SECONDS` (default 120 s). Issued for any well-formed User ID, so it does not reveal which accounts exist. |
-| `POST` | `/v1/auth/login` | none | Exchange a signed login challenge for a bearer token (HS256, `RELIC_JWT_TTL_SECONDS`, default 8 h). Only active human accounts can log in. |
+| `POST` | `/v1/auth/challenge` | none | Issue a single-use challenge (`purpose`: `login` or `registration`). Expires after `RELIC_CHALLENGE_TTL_SECONDS` (default 120 s). Bound to no account, so it reveals nothing about which accounts exist. |
+| `POST` | `/v1/auth/login` | none | `{challenge_id, public_key, signature}`: exchange a signed login challenge for a bearer token (HS256, `RELIC_JWT_TTL_SECONDS`, default 8 h). The account is found by its public key; `/v1/me` returns the User ID. Without a valid signature every failure is the same `401`; with one, a pending or rejected registration or a revoked account is reported as `403`. Only active human accounts get a token. |
 | `GET` | `/v1/me` | Any | The caller's User ID, role, owner type and public key. |
 | `POST` | `/v1/accounts` | none | Submit a registration request: the applicant's own public key, account details and a signature over a registration challenge (proof of possession). Returns `202 Accepted`; the request stays pending until a moderator signs an approval. RELIC never generates or receives private keys. |
 | `GET` | `/v1/registrations` | Moderator | Registration requests, oldest first. `status` = `pending` (default), `approved` or `rejected`. Includes name, organisation and email, which no other route exposes. |

@@ -14,8 +14,8 @@ Purpose = Literal["login", "registration"]
 
 _ISSUE = """
     INSERT INTO catalogue.auth_challenge
-        (purpose, nonce, claimed_user_id, audience, expires_at)
-    VALUES (%s::catalogue.auth_challenge_purpose, %s, %s, %s,
+        (purpose, nonce, audience, expires_at)
+    VALUES (%s::catalogue.auth_challenge_purpose, %s, %s,
             clock_timestamp() + make_interval(secs => %s))
     RETURNING challenge_id, purpose::text AS purpose, encode(nonce, 'hex') AS nonce,
               audience, expires_at,
@@ -27,7 +27,6 @@ _CONSUME = """
        SET consumed_at = clock_timestamp()
      WHERE challenge_id = %s
        AND purpose = %s::catalogue.auth_challenge_purpose
-       AND claimed_user_id IS NOT DISTINCT FROM %s
        AND audience = %s
        AND consumed_at IS NULL
        AND expires_at > clock_timestamp()
@@ -42,11 +41,10 @@ async def issue(
     purpose: Purpose,
     audience: str,
     ttl_seconds: int,
-    claimed_user_id: UUID | None,
 ) -> dict:
     cur = await conn.execute(
         _ISSUE,
-        (purpose, secrets.token_bytes(NONCE_BYTES), claimed_user_id, audience, ttl_seconds),
+        (purpose, secrets.token_bytes(NONCE_BYTES), audience, ttl_seconds),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -61,7 +59,6 @@ async def consume(
     challenge_id: UUID,
     purpose: Purpose,
     audience: str,
-    claimed_user_id: UUID | None,
 ) -> Challenge | None:
     """Mark a challenge used. Returns None if it is unknown, expired or spent.
 
@@ -69,7 +66,7 @@ async def consume(
     the signature that follows turns out to be invalid.
     """
     try:
-        cur = await conn.execute(_CONSUME, (challenge_id, purpose, claimed_user_id, audience))
+        cur = await conn.execute(_CONSUME, (challenge_id, purpose, audience))
         row = await cur.fetchone()
     except IntegrityError:
         # Expired between the WHERE clause and the row trigger.

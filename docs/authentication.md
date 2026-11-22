@@ -28,7 +28,9 @@ domain tag requires a `v2` and new vectors.
 The database (`catalogue.auth_challenge`, migration 008) guarantees that a
 challenge is consumed at most once and never after `expires_at`. The API
 consumes the challenge *before* checking the signature, so a failed attempt
-burns it. `audience` binds the proof to one deployment.
+burns it. `audience` binds the proof to one deployment. The request names only
+the `purpose` (`login` or `registration`): a challenge is bound to no account,
+so issuing one reveals nothing about which keys or accounts exist.
 
 ## Encoding
 
@@ -52,13 +54,24 @@ Common challenge fields, in order: `challenge_id`, `nonce`, `audience`,
 ### Login
 
 - `D = RELIC:login-challenge:v1`, `S = RELIC:login-signature:v1`
-- fields: common challenge fields, then `user_id`
-- `POST /v1/auth/login` with `{challenge_id, user_id, signature}`
+- fields: common challenge fields, then `public_key` (32 bytes)
+- `POST /v1/auth/login` with `{challenge_id, public_key, signature}`
 
-The challenge was issued for that `user_id`, the key is the one registered for
-that `user_id` in `catalogue.user_public`, and the account must be an active
-(non-revoked) human. The response is a bearer token. The account is re-checked
-on every request.
+The client identifies itself by its public key, which is unique across all
+accounts; `GET /v1/me` returns the User ID afterwards. The API checks, in
+order:
+
+1. The challenge is a live, unused login challenge (it is consumed either way).
+2. The signature verifies under the **submitted** public key. This happens
+   before any account lookup, so without the private key every failure (unknown
+   key, wrong signature, spent challenge) is the same `401` on the same path.
+3. Only then is the key looked up. Because the caller has proven possession,
+   the API can tell them about their own state: `403 Registration is pending
+   approval`, `403 Registration was rejected` or `403 Account has been revoked`.
+   An unknown key or a system account is `401`.
+
+An active human account gets a bearer token. The account is re-checked on
+every request.
 
 ### Registration
 
@@ -93,25 +106,48 @@ decision later without the API.
 
 ## Client
 
+Generate a key used only for RELIC, and build the signer:
+
 ```bash
+ssh-keygen -t ed25519 -a 100 -C relic -f ~/.ssh/relic_ed25519
 cargo build --release -p relic-ingest
-curl -s -X POST https://$HOST/v1/auth/challenge \
-     -H 'content-type: application/json' \
-     -d "{\"purpose\":\"login\",\"user_id\":\"$USER_ID\"}" > challenge.json
-target/release/relic-sign-challenge login --challenge challenge.json \
-     --key ~/.ssh/relic_ed25519 --key-passphrase-file ~/.config/relic/passphrase \
-     --user-id "$USER_ID" > login.json
-curl -s -X POST https://$HOST/v1/auth/login \
-     -H 'content-type: application/json' -d @login.json
 ```
 
-`relic-sign-challenge register --role analyst --name ... --email ...
-[--organisation ...]` produces the body for `POST /v1/accounts` the same way.
+The signer has no passphrase prompt yet: for an encrypted key pass
+`--key-passphrase-file <file>` (mode `0600`) to each command below.
 
-A Moderator decides a request like this (the tool prints what it is about to
-sign on stderr and refuses a request that is no longer pending):
+**Register** (applicant):
 
 ```bash
+curl -s -X POST https://$HOST/v1/auth/challenge \
+     -H 'content-type: application/json' -d '{"purpose":"registration"}' > challenge.json
+target/release/relic-sign-challenge register --challenge challenge.json \
+     --key ~/.ssh/relic_ed25519 --role analyst --name "Ada Lovelace" \
+     --email ada@example.org [--organisation "..."] > register.json
+curl -s -X POST https://$HOST/v1/accounts \
+     -H 'content-type: application/json' -d @register.json
+```
+
+**Log in** (anyone with a key; the same command tells an applicant whether
+their request is still pending or was rejected):
+
+```bash
+curl -s -X POST https://$HOST/v1/auth/challenge \
+     -H 'content-type: application/json' -d '{"purpose":"login"}' > challenge.json
+target/release/relic-sign-challenge login --challenge challenge.json \
+     --key ~/.ssh/relic_ed25519 > login.json
+TOKEN="$(curl -s -X POST https://$HOST/v1/auth/login \
+     -H 'content-type: application/json' -d @login.json | jq -r .access_token)"
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/me    # your user_id and role
+```
+
+**Decide a registration** (Moderator, after logging in as above). The tool
+prints what it is about to sign on stderr and refuses a request that is no
+longer pending:
+
+```bash
+MODERATOR_ID="$(curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/me | jq -r .user_id)"
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/registrations    # pending requests
 curl -s -H "authorization: Bearer $TOKEN" \
      https://$HOST/v1/registrations/$REQUEST_ID > request.json
 target/release/relic-sign-challenge decide-registration --request request.json \

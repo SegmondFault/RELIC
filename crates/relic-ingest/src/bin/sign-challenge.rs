@@ -29,11 +29,12 @@ struct Arguments {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Prove possession of a registered key to obtain a session token.
+    ///
+    /// The account is identified by the key alone; `GET /v1/me` returns its
+    /// User ID afterwards.
     Login {
         #[command(flatten)]
         common: Common,
-        #[arg(long)]
-        user_id: Uuid,
     },
     /// Prove possession of a new key when requesting an account.
     Register {
@@ -113,16 +114,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let body = match Arguments::parse().command {
-        Command::Login { common, user_id } => {
-            let (challenge_id, challenge, signer) = load(&common)?;
-            let digest = auth::login_digest(&challenge, user_id.as_bytes());
-            let signature = signer.sign_digest(auth::LOGIN_SIGNATURE_DOMAIN, &digest);
-            json!({
-                "challenge_id": challenge_id,
-                "user_id": user_id,
-                "signature": hex(&signature),
-            })
-        }
+        Command::Login { common } => login(&common)?,
         Command::Register {
             common,
             role,
@@ -208,6 +200,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
+}
+
+/// Body for `POST /v1/auth/login`: the account is identified by the key alone.
+fn login(common: &Common) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let (challenge_id, challenge, signer) = load(common)?;
+    let public_key = signer.verifying_key();
+    let digest = auth::login_digest(&challenge, &public_key);
+    let signature = signer.sign_digest(auth::LOGIN_SIGNATURE_DOMAIN, &digest);
+    Ok(json!({
+        "challenge_id": challenge_id,
+        "public_key": hex(&public_key),
+        "signature": hex(&signature),
+    }))
 }
 
 fn load(

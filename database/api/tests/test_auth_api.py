@@ -19,6 +19,7 @@ from .conftest import (
     JWT_SECRET,
     REPO,
     decide,
+    key_login_body,
     login,
     login_body,
     make_settings,
@@ -62,12 +63,21 @@ def test_login_with_another_key_fails(client, database):
     assert client.post("/v1/auth/login", json=body).status_code == 401
 
 
-def test_login_signature_cannot_be_moved_to_another_user(client, database):
+def test_login_signature_cannot_be_moved_to_another_key(client, database):
     victim = database.create_user("moderator")
     attacker = database.create_user("viewer")
     body = login_body(client, attacker)
-    body["user_id"] = str(victim.user_id)
+    body["public_key"] = victim.public_key_hex
     assert client.post("/v1/auth/login", json=body).status_code == 401
+
+
+def test_login_identifies_the_account_by_key(client, database):
+    analyst = database.create_user("analyst")
+    database.create_user("moderator")
+    token = login(client, analyst)
+    me = client.get("/v1/me", headers=bearer(token)).json()
+    assert me["user_id"] == str(analyst.user_id)
+    assert me["role"] == "analyst"
 
 
 def test_failed_login_burns_the_challenge(client, database):
@@ -78,16 +88,25 @@ def test_failed_login_burns_the_challenge(client, database):
     assert client.post("/v1/auth/login", json=good).status_code == 401
 
 
-def test_unknown_user_gets_a_challenge_but_cannot_log_in(client):
-    user_id = str(uuid.uuid4())
-    response = client.post("/v1/auth/challenge", json={"purpose": "login", "user_id": user_id})
-    assert response.status_code == 201
-    body = {
-        "challenge_id": response.json()["challenge_id"],
-        "user_id": user_id,
-        "signature": "00" * 64,
-    }
-    assert client.post("/v1/auth/login", json=body).status_code == 401
+def test_unknown_key_cannot_log_in_even_with_a_valid_signature(client):
+    response = client.post("/v1/auth/login", json=key_login_body(client, SigningKey.generate()))
+    assert response.status_code == 401
+
+
+def test_failures_without_the_private_key_are_indistinguishable(client, database):
+    """Unknown key, registered key, pending registration: same answer without a valid signature."""
+    registered = database.create_user("analyst")
+    applicant = SigningKey.generate()
+    assert client.post("/v1/accounts", json=registration_body(client, applicant)).status_code == 202
+
+    responses = [
+        client.post(
+            "/v1/auth/login", json=key_login_body(client, key, signer=SigningKey.generate())
+        )
+        for key in (SigningKey.generate(), registered.key, applicant)
+    ]
+    assert {response.status_code for response in responses} == {401}
+    assert len({response.text for response in responses}) == 1
 
 
 def test_system_account_cannot_log_in(client, database):
@@ -103,7 +122,13 @@ def test_revocation_blocks_login_and_live_tokens(client, database):
     database.revoke(analyst.user_id)
 
     assert client.get("/v1/me", headers=bearer(token)).status_code == 401
-    assert client.post("/v1/auth/login", json=login_body(client, analyst)).status_code == 401
+    response = client.post("/v1/auth/login", json=login_body(client, analyst))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Account has been revoked"
+
+    # Without the key the revocation is not disclosed.
+    forged = client.post("/v1/auth/login", json=login_body(client, analyst, signer=SigningKey.generate()))
+    assert forged.status_code == 401
 
 
 def test_expired_challenge_is_rejected(database):
@@ -116,13 +141,15 @@ def test_expired_challenge_is_rejected(database):
 
 
 def test_challenge_request_validation(client):
-    assert client.post("/v1/auth/challenge", json={"purpose": "login"}).status_code == 422
-    assert (
-        client.post(
-            "/v1/auth/challenge", json={"purpose": "registration", "user_id": str(uuid.uuid4())}
-        ).status_code
-        == 422
-    )
+    assert client.post("/v1/auth/challenge", json={"purpose": "login"}).status_code == 201
+    # Challenges name no account.
+    for purpose in ("login", "registration"):
+        assert (
+            client.post(
+                "/v1/auth/challenge", json={"purpose": purpose, "user_id": str(uuid.uuid4())}
+            ).status_code
+            == 422
+        )
     assert client.post("/v1/auth/challenge", json={"purpose": "admin"}).status_code == 422
 
 
@@ -259,12 +286,38 @@ def test_approved_registration_can_log_in_with_requested_role(client, database):
     request_id = client.post(
         "/v1/accounts", json=registration_body(client, key, role="viewer")
     ).json()["registration_request_id"]
-    user_id = uuid.UUID(decide(client, database, request_id)["user_id"])
+    user_id = decide(client, database, request_id)["user_id"]
 
-    from .conftest import User
+    # The applicant needs only their key: /v1/me tells them their User ID.
+    response = client.post("/v1/auth/login", json=key_login_body(client, key))
+    assert response.status_code == 200, response.text
+    me = client.get("/v1/me", headers=bearer(response.json()["access_token"])).json()
+    assert me["role"] == "viewer"
+    assert me["user_id"] == user_id
 
-    token = login(client, User(user_id, key, "viewer"))
-    assert client.get("/v1/me", headers=bearer(token)).json()["role"] == "viewer"
+
+def test_pending_registration_is_reported_only_to_the_key_holder(client):
+    key = SigningKey.generate()
+    assert client.post("/v1/accounts", json=registration_body(client, key)).status_code == 202
+
+    response = client.post("/v1/auth/login", json=key_login_body(client, key))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Registration is pending approval"
+
+
+def test_rejected_registration_is_reported_only_to_the_key_holder(client, database):
+    key = SigningKey.generate()
+    request_id = client.post("/v1/accounts", json=registration_body(client, key)).json()[
+        "registration_request_id"
+    ]
+    decide(client, database, request_id, "rejected")
+
+    response = client.post("/v1/auth/login", json=key_login_body(client, key))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Registration was rejected"
+
+    forged = key_login_body(client, key, signer=SigningKey.generate())
+    assert client.post("/v1/auth/login", json=forged).status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -297,9 +350,7 @@ def test_registration_challenge_is_single_use(client):
 
 def test_login_challenge_cannot_be_used_for_registration(client, database):
     analyst = database.create_user("analyst")
-    login_challenge = client.post(
-        "/v1/auth/challenge", json={"purpose": "login", "user_id": str(analyst.user_id)}
-    ).json()
+    login_challenge = client.post("/v1/auth/challenge", json={"purpose": "login"}).json()
     body = registration_body(client, SigningKey.generate())
     body["challenge_id"] = login_challenge["challenge_id"]
     assert client.post("/v1/accounts", json=body).status_code == 401
@@ -402,9 +453,7 @@ def test_rust_client_registration_and_login(client, database, tmp_path: Path):
     assert decided.status_code == 200, decided.text
     user_id = decided.json()["user_id"]
 
-    login_request = signed(
-        ["login", "--user-id", str(user_id)], {"purpose": "login", "user_id": str(user_id)}
-    )
+    login_request = signed(["login"], {"purpose": "login"})
     token = client.post("/v1/auth/login", json=login_request)
     assert token.status_code == 200, token.text
     me = client.get("/v1/me", headers=bearer(token.json()["access_token"])).json()
@@ -420,15 +469,12 @@ def _openssh_public_key(path: Path) -> bytes:
 
 
 def _login_with_cli(client, user_id, key_path: Path, tmp_path: Path) -> str:
-    challenge = client.post(
-        "/v1/auth/challenge", json={"purpose": "login", "user_id": str(user_id)}
-    ).json()
+    challenge = client.post("/v1/auth/challenge", json={"purpose": "login"}).json()
     challenge_path = tmp_path / f"login-{user_id}.json"
     challenge_path.write_text(json.dumps(challenge))
     body = json.loads(
         subprocess.run(
-            [str(SIGNER), "login", "--challenge", str(challenge_path), "--key", str(key_path),
-             "--user-id", str(user_id)],
+            [str(SIGNER), "login", "--challenge", str(challenge_path), "--key", str(key_path)],
             check=True,
             capture_output=True,
             text=True,

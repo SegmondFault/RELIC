@@ -64,8 +64,8 @@ class Challenge:
         ]
 
 
-def login_record(challenge: Challenge, user_id: UUID) -> bytes:
-    return encode_fields(LOGIN_RECORD_DOMAIN, [*challenge._fields(), user_id.bytes])
+def login_record(challenge: Challenge, public_key: bytes) -> bytes:
+    return encode_fields(LOGIN_RECORD_DOMAIN, [*challenge._fields(), public_key])
 
 
 def registration_record(

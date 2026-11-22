@@ -74,15 +74,15 @@ fn challenge_json(challenge: &auth::AuthChallenge) -> Value {
 
 fn build_vectors() -> Value {
     let challenge = challenge();
-    let user_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
 
     let login_seed = [0x11; 32];
+    let login_key = SystemSigner::from_seed(login_seed).verifying_key();
     let login = signed_case(
         "login",
         login_seed,
-        &auth::login_record(&challenge, &user_id),
+        &auth::login_record(&challenge, &login_key),
         auth::LOGIN_SIGNATURE_DOMAIN,
-        json!({ "challenge": challenge_json(&challenge), "user_id": hex(&user_id) }),
+        json!({ "challenge": challenge_json(&challenge) }),
     );
 
     let mut registrations = Vec::new();

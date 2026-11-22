@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 Role = Literal["viewer", "analyst", "moderator"]
 
@@ -44,14 +44,8 @@ class _Request(BaseModel):
 
 
 class ChallengeRequest(_Request):
+    # Deliberately no identity: a challenge is bound to no account.
     purpose: Literal["login", "registration"]
-    user_id: UUID | None = None
-
-    @model_validator(mode="after")
-    def _user_matches_purpose(self) -> ChallengeRequest:
-        if (self.purpose == "login") != (self.user_id is not None):
-            raise ValueError("user_id is required for login and forbidden for registration")
-        return self
 
 
 class ChallengeResponse(BaseModel):
@@ -65,7 +59,7 @@ class ChallengeResponse(BaseModel):
 
 class LoginRequest(_Request):
     challenge_id: UUID
-    user_id: UUID
+    public_key: HexKey
     signature: HexSignature
 
 

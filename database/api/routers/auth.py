@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from .. import challenges
 from ..crypto import LOGIN_SIGNATURE_DOMAIN, login_record, verify
 from ..deps import (
-    IDENTITY_QUERY,
+    IDENTITY_BY_KEY_QUERY,
     ConnDep,
     CurrentIdentity,
     SettingsDep,
@@ -30,16 +30,24 @@ audit = logging.getLogger("relic.audit")
 async def create_challenge(body: ChallengeRequest, settings: SettingsDep, conn: ConnDep):
     """Issue a single-use challenge for login or registration.
 
-    A login challenge is issued for any well-formed User ID, so this endpoint
-    does not reveal which accounts exist.
+    A challenge names no account, so issuing one reveals nothing about which
+    keys or accounts exist.
     """
     return await challenges.issue(
         conn,
         purpose=body.purpose,
         audience=settings.audience,
         ttl_seconds=settings.challenge_ttl_seconds,
-        claimed_user_id=body.user_id,
     )
+
+
+_REGISTRATION_STATUS = """
+    SELECT coalesce(decision::text, 'pending') AS status
+      FROM catalogue.registration_request
+     WHERE public_key = %s
+     ORDER BY (decision IS NULL) DESC, requested_at DESC
+     LIMIT 1
+"""
 
 
 @router.post(
@@ -48,37 +56,59 @@ async def create_challenge(body: ChallengeRequest, settings: SettingsDep, conn: 
     dependencies=[Depends(auth_rate_limit)],
 )
 async def login(body: LoginRequest, settings: SettingsDep, conn: ConnDep):
-    """Exchange a signed login challenge for a short-lived bearer token."""
+    """Exchange a signed login challenge for a short-lived bearer token.
+
+    The caller names itself by public key. The signature is checked against
+    that key before any account is looked up, so every failure without the
+    private key (unknown key, wrong signature, spent or expired challenge)
+    is identical and takes the same path.
+    """
+    public_key = bytes.fromhex(body.public_key)
+    fingerprint = body.public_key[:16]
     challenge = await challenges.consume(
         conn,
         challenge_id=body.challenge_id,
         purpose="login",
         audience=settings.audience,
-        claimed_user_id=body.user_id,
     )
-    cur = await conn.execute(IDENTITY_QUERY, (body.user_id,))
-    account = await cur.fetchone()
-
-    authenticated = (
-        challenge is not None
-        and account is not None
-        and account["owner_type"] == "human"
-        and account["role"] is not None
-        and not account["revoked"]
-        and verify(
-            bytes.fromhex(account["public_key"]),
-            LOGIN_SIGNATURE_DOMAIN,
-            login_record(challenge, body.user_id),
-            bytes.fromhex(body.signature),
-        )
-    )
-    if not authenticated:
-        audit.warning("login rejected user_id=%s", body.user_id)
+    if challenge is None or not verify(
+        public_key,
+        LOGIN_SIGNATURE_DOMAIN,
+        login_record(challenge, public_key),
+        bytes.fromhex(body.signature),
+    ):
+        audit.warning("login rejected key=%s", fingerprint)
         raise unauthorised("Authentication failed")
 
-    audit.info("login user_id=%s role=%s", body.user_id, account["role"])
+    # From here on the caller has proven possession of the key, so telling
+    # them the state of their own account or registration leaks nothing.
+    cur = await conn.execute(IDENTITY_BY_KEY_QUERY, (public_key,))
+    account = await cur.fetchone()
+    if account is None:
+        cur = await conn.execute(_REGISTRATION_STATUS, (public_key,))
+        registration = await cur.fetchone()
+        audit.info(
+            "login without account key=%s registration=%s",
+            fingerprint,
+            registration["status"] if registration else None,
+        )
+        if registration is not None and registration["status"] == "pending":
+            raise HTTPException(status_code=403, detail="Registration is pending approval")
+        if registration is not None and registration["status"] == "rejected":
+            raise HTTPException(status_code=403, detail="Registration was rejected")
+        raise unauthorised("Authentication failed")
+
+    if account["revoked"]:
+        audit.warning("login rejected for revoked account user_id=%s", account["user_id"])
+        raise HTTPException(status_code=403, detail="Account has been revoked")
+    if account["owner_type"] != "human" or account["role"] is None:
+        # System accounts sign chain entries only; they never get a session.
+        audit.warning("login rejected for system account user_id=%s", account["user_id"])
+        raise unauthorised("Authentication failed")
+
+    audit.info("login user_id=%s role=%s", account["user_id"], account["role"])
     return TokenResponse(
-        access_token=issue_token(settings, body.user_id),
+        access_token=issue_token(settings, account["user_id"]),
         expires_in=settings.jwt_ttl_seconds,
     )
 

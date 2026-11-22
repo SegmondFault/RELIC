@@ -6,9 +6,9 @@
 #   scripts/local-dev.sh bootstrap-moderator <key.pub> <name> <email>
 #                                                   create the first Moderator (operator step)
 #   scripts/local-dev.sh pending                    list pending registration requests
-#   scripts/local-dev.sh approve|reject <request_id> <moderator_id> <moderator_key>
-#                                                   log in as the Moderator, sign and submit the
-#                                                   decision through the running API
+#   scripts/local-dev.sh approve|reject <request_id> <moderator_key>
+#                                                   log in as the Moderator (by key), sign and
+#                                                   submit the decision through the running API
 #   scripts/local-dev.sh api                        run the API on http://127.0.0.1:8000 (foreground)
 #   scripts/local-dev.sh psql                       open psql on the dev database as superuser
 #   scripts/local-dev.sh down                       remove the Postgres container and its data
@@ -90,11 +90,11 @@ SQL
 
 cmd_decide() {
     local decision="$1"; shift
-    (( $# == 3 )) || {
-        echo "usage: $0 ${decision%d} <request_id> <moderator_id> <moderator_key>" >&2; exit 2;
+    (( $# == 2 )) || {
+        echo "usage: $0 ${decision%d} <request_id> <moderator_key>" >&2; exit 2;
     }
-    local request_id="$1" moderator_id="$2" key="$3"
-    require_uuid "$request_id"; require_uuid "$moderator_id"
+    local request_id="$1" key="$2"
+    require_uuid "$request_id"
     local api="http://127.0.0.1:${api_port}/v1"
     local signer="$repo_dir/target/debug/relic-sign-challenge"
     [[ -x "$signer" ]] || cargo build -q -p relic-ingest --bin relic-sign-challenge
@@ -103,13 +103,15 @@ cmd_decide() {
     trap "rm -rf '$work'" RETURN
 
     curl -sS --fail-with-body -X POST "$api/auth/challenge" -H 'content-type: application/json' \
-        -d "{\"purpose\":\"login\",\"user_id\":\"$moderator_id\"}" > "$work/challenge.json"
-    "$signer" login --challenge "$work/challenge.json" --key "$key" \
-        --user-id "$moderator_id" > "$work/login.json"
+        -d '{"purpose":"login"}' > "$work/challenge.json"
+    "$signer" login --challenge "$work/challenge.json" --key "$key" > "$work/login.json"
     local token
     token="$(curl -sS --fail-with-body -X POST "$api/auth/login" \
         -H 'content-type: application/json' -d @"$work/login.json" \
         | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')"
+    local moderator_id
+    moderator_id="$(curl -sS --fail-with-body "$api/me" -H "authorization: Bearer $token" \
+        | python3 -c 'import json, sys; print(json.load(sys.stdin)["user_id"])')"
     curl -sS --fail-with-body "$api/registrations/$request_id" \
         -H "authorization: Bearer $token" > "$work/request.json"
     "$signer" decide-registration --request "$work/request.json" --moderator-id "$moderator_id" \
