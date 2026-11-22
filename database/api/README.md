@@ -74,7 +74,8 @@ overall. Exceeding them returns `429` with `Retry-After`.
 ### Catalogue (read)
 
 All `GET`, all *Any* role: a valid bearer token is required. Implemented so
-far: `/v1/users` and `/v1/users/{user_id}`; the rest return `501`.
+far: `/v1/users`, `/v1/users/{user_id}` and the revocation reads; the rest
+return `501`.
 
 | Path | Returns |
 |---|---|
@@ -92,7 +93,7 @@ far: `/v1/users` and `/v1/users/{user_id}`; the rest return `501`.
 | `/v1/classifications`, `/v1/classifications/{id}` | Signed labels on binaries, functions or behavioural compositions. |
 | `/v1/flags`, `/v1/flags/{id}` | Viewer flags on catalogue objects. |
 | `/v1/flag-responses` | Analyst responses to flags. |
-| `/v1/revocations`, `/v1/revocations/{id}` | Revocation requests and moderator decisions. |
+| `/v1/revocations`, `/v1/revocations/{id}` | Revocation requests and moderator decisions (implemented, see Revocations). |
 | `/v1/integrity`, `/v1/integrity/{id}` | The append-only, system-signed integrity chain (integer IDs). |
 | `/v1/mmr-checkpoints`, `/v1/mmr-checkpoints/{id}` | Signed Merkle Mountain Range checkpoints over the chain (integer IDs). |
 | `/v1/mmr-checkpoints/latest` | The newest checkpoint. |
@@ -122,10 +123,15 @@ returns the original result; the same ID with different content is a conflict.
 
 ### Revocations
 
+Implemented. Signed formats: [`docs/authentication.md`](../../docs/authentication.md#revocation-request);
+`relic-sign-challenge request-revocation` and `decide-revocation` produce the bodies.
+
 | Method | Path | Role | Description |
 |---|---|---|---|
-| `POST` | `/v1/revocations` | Analyst · Signed | Request revocation of a catalogue object, or of an account (`target_type = user`), with a reason. |
-| `POST` | `/v1/revocations/{id}/decision` | Moderator · Signed | Approve or reject a pending request. A decision is final. |
+| `GET` | `/v1/revocations` | Any | Requests and decisions, oldest first. Filters: `status` (`pending`, `approved`, `rejected`), `target_type`, `target_id`. Both signatures are returned as hex for offline re-verification. |
+| `GET` | `/v1/revocations/{id}` | Any | One request, in the exact shape `decide-revocation` signs. |
+| `POST` | `/v1/revocations` | Analyst · Signed | `{revocation_id, analyst_id, target_type, target_id, reason, signature}`: request revocation of a catalogue object, or of an account (`target_type = user`). `analyst_id` must be the caller; `revocation_id` is a fresh UUID chosen by the client. `201` created; `200` identical retry; `403` bad signature; `409` ID reused with other content, target already has an open request, or target already revoked; `422` unknown target. |
+| `POST` | `/v1/revocations/{id}/decision` | Moderator · Signed | `{moderator_id, decision, signature}`: approve or reject a pending request. `moderator_id` must be the caller; never for the Moderator's own account (`403`). Final: a second decision is `409`. An approved account revocation blocks that account's tokens and logins immediately. |
 
 Nothing is deleted. A revoked object or account remains visible, marked as
 revoked.

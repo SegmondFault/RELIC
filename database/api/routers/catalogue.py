@@ -157,14 +157,7 @@ async def list_flag_responses(limit: int = Query(100, ge=1, le=500), offset: int
     todo()
 
 
-@router.get("/revocations")
-async def list_revocations(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
-    todo()
-
-
-@router.get("/revocations/{revocation_id}")
-async def get_revocation(revocation_id: UUID):
-    todo()
+# /revocations and /revocations/{id} are served by routers/revocations.py.
 
 
 @router.get("/integrity")

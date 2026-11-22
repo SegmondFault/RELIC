@@ -25,6 +25,10 @@ REGISTRATION_RECORD_DOMAIN = b"RELIC:registration-request:v1"
 REGISTRATION_SIGNATURE_DOMAIN = b"RELIC:registration-proof-signature:v1"
 REGISTRATION_DECISION_RECORD_DOMAIN = b"RELIC:registration-decision:v1"
 REGISTRATION_DECISION_SIGNATURE_DOMAIN = b"RELIC:registration-decision-signature:v1"
+REVOCATION_REQUEST_RECORD_DOMAIN = b"RELIC:revocation-request:v1"
+REVOCATION_REQUEST_SIGNATURE_DOMAIN = b"RELIC:revocation-request-signature:v1"
+REVOCATION_DECISION_RECORD_DOMAIN = b"RELIC:revocation-decision:v1"
+REVOCATION_DECISION_SIGNATURE_DOMAIN = b"RELIC:revocation-decision-signature:v1"
 
 PUBLIC_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
@@ -116,6 +120,42 @@ def registration_decision_record(
             moderator_id.bytes,
             decision.encode("utf-8"),
         ],
+    )
+
+
+@dataclass(frozen=True)
+class RevocationRequest:
+    """An Analyst's request to revoke one catalogue object or account."""
+
+    revocation_id: UUID
+    analyst_id: UUID
+    target_type: str
+    target_id: UUID
+    reason: str
+
+    def _fields(self) -> list[bytes]:
+        return [
+            self.revocation_id.bytes,
+            self.analyst_id.bytes,
+            self.target_type.encode("utf-8"),
+            self.target_id.bytes,
+            self.reason.encode("utf-8"),
+        ]
+
+
+def revocation_request_record(request: RevocationRequest) -> bytes:
+    return encode_fields(REVOCATION_REQUEST_RECORD_DOMAIN, request._fields())
+
+
+def revocation_decision_record(
+    request: RevocationRequest, *, moderator_id: UUID, decision: str
+) -> bytes:
+    """What a Moderator signs: the stored request, who decided and how."""
+    if decision not in ("approved", "rejected"):
+        raise ValueError("decision must be 'approved' or 'rejected'")
+    return encode_fields(
+        REVOCATION_DECISION_RECORD_DOMAIN,
+        [*request._fields(), moderator_id.bytes, decision.encode("utf-8")],
     )
 
 

@@ -1,16 +1,22 @@
 //! Client-side signer for RELIC account messages.
 //!
 //! `login` and `register` read a challenge exactly as returned by
-//! `POST /v1/auth/challenge`; `decide-registration` reads a request exactly as
-//! returned by `GET /v1/registrations/{id}`. Each signs the canonical message
-//! with the user's OpenSSH Ed25519 key and prints the JSON body to POST.
+//! `POST /v1/auth/challenge`; `decide-registration` and `decide-revocation`
+//! read a request exactly as returned by `GET /v1/registrations/{id}` and
+//! `GET /v1/revocations/{id}`; `request-revocation` takes its fields as
+//! arguments. Each signs the canonical message with the user's OpenSSH Ed25519
+//! key and prints the JSON body to POST.
 
-use std::{fs, path::PathBuf, process::ExitCode};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use clap::{Args, Parser, Subcommand};
 use relic_crypto::{
     SystemSigner,
-    auth::{self, AuthChallenge, RegistrationDecision, RegistrationDetails},
+    auth::{self, AuthChallenge, Decision, RegistrationDetails, RevocationRequest},
     read_secret_file,
 };
 use serde::Deserialize;
@@ -18,9 +24,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(
-    about = "Sign RELIC login, registration and registration-decision messages on the user's machine"
-)]
+#[command(about = "Sign RELIC login, registration and revocation messages on the user's machine")]
 struct Arguments {
     #[command(subcommand)]
     command: Command,
@@ -62,7 +66,56 @@ enum Command {
         #[command(flatten)]
         key: KeyArgs,
     },
+    /// Sign an Analyst's request to revoke a catalogue object or account.
+    RequestRevocation {
+        /// The requesting Analyst's own User ID.
+        #[arg(long)]
+        analyst_id: Uuid,
+        #[arg(long, value_parser = TARGET_TYPES)]
+        target_type: String,
+        #[arg(long)]
+        target_id: Uuid,
+        #[arg(long)]
+        reason: String,
+        /// Request ID; a fresh random UUID if omitted. Reuse it to retry.
+        #[arg(long)]
+        revocation_id: Option<Uuid>,
+        #[command(flatten)]
+        key: KeyArgs,
+    },
+    /// Sign a Moderator's decision on a pending revocation request.
+    DecideRevocation {
+        /// Request JSON returned by `GET /v1/revocations/{id}`.
+        #[arg(long)]
+        request: PathBuf,
+        /// The deciding Moderator's own User ID.
+        #[arg(long)]
+        moderator_id: Uuid,
+        #[arg(long, value_parser = ["approved", "rejected"])]
+        decision: String,
+        #[command(flatten)]
+        key: KeyArgs,
+    },
 }
+
+/// `catalogue.corpus_target_type`.
+const TARGET_TYPES: [&str; 15] = [
+    "user",
+    "source",
+    "batch",
+    "binary",
+    "function",
+    "fidbf",
+    "bsim",
+    "provenance",
+    "license_assertion",
+    "software_component",
+    "software_release",
+    "binary_component_assertion",
+    "behavioural_composition",
+    "classification",
+    "flag",
+];
 
 #[derive(Debug, Args)]
 struct Common {
@@ -92,6 +145,16 @@ struct RegistrationFile {
     name: String,
     organisation: Option<String>,
     email: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevocationFile {
+    revocation_id: Uuid,
+    status: String,
+    analyst_id: Uuid,
+    target_type: String,
+    target_id: Uuid,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,11 +219,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let public_key: [u8; 32] = unhex(&file.public_key)?
                 .try_into()
                 .map_err(|_| "applicant public key must be 32 bytes")?;
-            let verdict = if decision == "approved" {
-                RegistrationDecision::Approved
-            } else {
-                RegistrationDecision::Rejected
-            };
+            let verdict = parse_decision(&decision);
             let details = RegistrationDetails {
                 public_key: &public_key,
                 requested_role: &file.requested_role,
@@ -197,9 +256,106 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "signature": hex(&signature),
             })
         }
+        Command::RequestRevocation {
+            analyst_id,
+            target_type,
+            target_id,
+            reason,
+            revocation_id,
+            key,
+        } => request_revocation(
+            revocation_id.unwrap_or_else(Uuid::new_v4),
+            analyst_id,
+            &target_type,
+            target_id,
+            &reason,
+            &key,
+        )?,
+        Command::DecideRevocation {
+            request,
+            moderator_id,
+            decision,
+            key,
+        } => decide_revocation(&request, moderator_id, parse_decision(&decision), &key)?,
     };
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
+}
+
+/// Body for `POST /v1/revocations`.
+fn request_revocation(
+    revocation_id: Uuid,
+    analyst_id: Uuid,
+    target_type: &str,
+    target_id: Uuid,
+    reason: &str,
+    key: &KeyArgs,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let request = RevocationRequest {
+        revocation_id: revocation_id.as_bytes(),
+        analyst_id: analyst_id.as_bytes(),
+        target_type,
+        target_id: target_id.as_bytes(),
+        reason,
+    };
+    eprintln!("Signing: revocation request {revocation_id} for {target_type} {target_id}");
+    let signer = load_key(key)?;
+    let digest = auth::revocation_request_digest(&request);
+    let signature = signer.sign_digest(auth::REVOCATION_REQUEST_SIGNATURE_DOMAIN, &digest);
+    Ok(json!({
+        "revocation_id": revocation_id,
+        "analyst_id": analyst_id,
+        "target_type": target_type,
+        "target_id": target_id,
+        "reason": reason,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/revocations/{id}/decision`, signed over the request as stored.
+fn decide_revocation(
+    request: &Path,
+    moderator_id: Uuid,
+    verdict: Decision,
+    key: &KeyArgs,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let file: RevocationFile = serde_json::from_slice(&fs::read(request)?)?;
+    if file.status != "pending" {
+        return Err(format!("request is already {}", file.status).into());
+    }
+    let stored = RevocationRequest {
+        revocation_id: file.revocation_id.as_bytes(),
+        analyst_id: file.analyst_id.as_bytes(),
+        target_type: &file.target_type,
+        target_id: file.target_id.as_bytes(),
+        reason: &file.reason,
+    };
+    // Show exactly what is being signed before signing it.
+    eprintln!(
+        "Signing: {} revocation {} of {} {} requested by {}: {}",
+        verdict.as_str(),
+        file.revocation_id,
+        file.target_type,
+        file.target_id,
+        file.analyst_id,
+        file.reason,
+    );
+    let signer = load_key(key)?;
+    let digest = auth::revocation_decision_digest(&stored, moderator_id.as_bytes(), verdict);
+    let signature = signer.sign_digest(auth::REVOCATION_DECISION_SIGNATURE_DOMAIN, &digest);
+    Ok(json!({
+        "moderator_id": moderator_id,
+        "decision": verdict.as_str(),
+        "signature": hex(&signature),
+    }))
+}
+
+fn parse_decision(decision: &str) -> Decision {
+    if decision == "approved" {
+        Decision::Approved
+    } else {
+        Decision::Rejected
+    }
 }
 
 /// Body for `POST /v1/auth/login`: the account is identified by the key alone.

@@ -255,7 +255,7 @@ BEGIN
             decision, decided_at, request_signature, decision_signature
         ) VALUES (
             analyst, moderator_b, 'user', moderator_a, 'pre-decided',
-            'approved', clock_timestamp(), '\x01', '\x02'
+            'approved', clock_timestamp(), decode(repeat('01', 64), 'hex'), decode(repeat('02', 64), 'hex')
         );
     EXCEPTION WHEN check_violation THEN
         rejected := true;
@@ -267,14 +267,14 @@ BEGIN
     INSERT INTO revocation (
         analyst_request_id, target_type, target_id, reason, request_signature
     ) VALUES (
-        analyst, 'user', moderator_a, 'test', '\x01'
+        analyst, 'user', moderator_a, 'test', decode(repeat('01', 64), 'hex')
     ) RETURNING revocation_id INTO rev_id;
 
     rejected := false;
     BEGIN
         UPDATE revocation
            SET moderator_id = moderator_a, decision = 'rejected',
-               decided_at = clock_timestamp(), decision_signature = '\x02'
+               decided_at = clock_timestamp(), decision_signature = decode(repeat('02', 64), 'hex')
          WHERE revocation_id = rev_id;
     EXCEPTION WHEN insufficient_privilege THEN
         rejected := true;
@@ -285,7 +285,7 @@ BEGIN
 
     UPDATE revocation
        SET moderator_id = moderator_b, decision = 'approved',
-           decided_at = '2000-01-01', decision_signature = '\x02'
+           decided_at = '2000-01-01', decision_signature = decode(repeat('02', 64), 'hex')
      WHERE revocation_id = rev_id;
 
     IF (SELECT decided_at FROM revocation WHERE revocation_id = rev_id)
@@ -305,6 +305,83 @@ BEGIN
 
     IF NOT account_is_revoked(moderator_a) THEN
         RAISE EXCEPTION 'approved account revocation is not effective';
+    END IF;
+END
+$$;
+
+-- Revocation signatures are Ed25519-sized, one open request per target, and
+-- a revoked target cannot be requested again. A rejected one can.
+DO $$
+DECLARE
+    rejected boolean;
+    rev_id uuid;
+    analyst uuid := (SELECT id FROM pg_temp.t WHERE name = 'analyst');
+    viewer uuid := (SELECT id FROM pg_temp.t WHERE name = 'viewer');
+    moderator_b uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_b');
+    sig bytea := decode(repeat('03', 64), 'hex');
+BEGIN
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst, 'user', viewer, 'short signature', '\x01');
+    EXCEPTION WHEN check_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'non-Ed25519 request signature was accepted';
+    END IF;
+
+    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    VALUES (analyst, 'user', viewer, 'first', sig)
+    RETURNING revocation_id INTO rev_id;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst, 'user', viewer, 'second', sig);
+    EXCEPTION WHEN unique_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'second open revocation request for one target was accepted';
+    END IF;
+
+    UPDATE revocation
+       SET moderator_id = moderator_b, decision = 'rejected',
+           decided_at = clock_timestamp(), decision_signature = sig
+     WHERE revocation_id = rev_id;
+
+    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    VALUES (analyst, 'user', viewer, 'after rejection', sig)
+    RETURNING revocation_id INTO rev_id;
+
+    rejected := false;
+    BEGIN
+        UPDATE revocation
+           SET moderator_id = moderator_b, decision = 'approved',
+               decided_at = clock_timestamp(), decision_signature = '\x02'
+         WHERE revocation_id = rev_id;
+    EXCEPTION WHEN check_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'non-Ed25519 decision signature was accepted';
+    END IF;
+
+    UPDATE revocation
+       SET moderator_id = moderator_b, decision = 'approved',
+           decided_at = clock_timestamp(), decision_signature = sig
+     WHERE revocation_id = rev_id;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst, 'user', viewer, 'again', sig);
+    EXCEPTION WHEN unique_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'revocation of an already revoked target was accepted';
     END IF;
 END
 $$;

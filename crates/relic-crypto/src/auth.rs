@@ -1,6 +1,9 @@
-//! Canonical authentication messages: login and registration proof-of-possession.
+//! Canonical account messages: login, registration proof-of-possession,
+//! registration decisions, and revocation requests and decisions.
 //!
-//! Both messages are signed over a single-use server challenge. The API
+//! Login and registration proofs are signed over a single-use server
+//! challenge. Decisions and revocation requests are single-use because the
+//! identifier they sign is unique and stored. The API
 //! (Python) re-implements these exact encodings and is pinned to the test
 //! vectors in `tests/vectors/auth-v1.json`; changing any field, order,
 //! encoding or domain requires a new version and new vectors.
@@ -21,14 +24,28 @@ pub const REGISTRATION_DECISION_RECORD_DOMAIN: &[u8] = b"RELIC:registration-deci
 pub const REGISTRATION_DECISION_SIGNATURE_DOMAIN: &[u8] =
     b"RELIC:registration-decision-signature:v1";
 
-/// A Moderator's verdict on a pending registration request.
+/// Record domain for an Analyst's revocation request.
+pub const REVOCATION_REQUEST_RECORD_DOMAIN: &[u8] = b"RELIC:revocation-request:v1";
+/// Signature domain for an Analyst's revocation request.
+pub const REVOCATION_REQUEST_SIGNATURE_DOMAIN: &[u8] = b"RELIC:revocation-request-signature:v1";
+/// Record domain for a Moderator's decision on a revocation request.
+pub const REVOCATION_DECISION_RECORD_DOMAIN: &[u8] = b"RELIC:revocation-decision:v1";
+/// Signature domain for a Moderator's decision on a revocation request.
+pub const REVOCATION_DECISION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:revocation-decision-signature:v1";
+
+/// A Moderator's verdict on a pending registration or revocation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RegistrationDecision {
+pub enum Decision {
     Approved,
     Rejected,
 }
 
-impl RegistrationDecision {
+/// Verdict on a registration request.
+pub type RegistrationDecision = Decision;
+/// Verdict on a revocation request.
+pub type RevocationDecision = Decision;
+
+impl Decision {
     /// The canonical (and database enum) spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -177,4 +194,81 @@ pub fn registration_decision_digest(
         moderator_id,
         decision,
     ))
+}
+
+/// An Analyst's request to revoke one catalogue object or account.
+///
+/// The Analyst chooses `revocation_id` (a fresh UUID). It is the primary key
+/// of the stored row, so a signed request can be admitted at most once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevocationRequest<'a> {
+    pub revocation_id: &'a [u8; 16],
+    /// The requesting Analyst's User ID.
+    pub analyst_id: &'a [u8; 16],
+    /// A `corpus_target_type` value, e.g. `user` or `fidbf`.
+    pub target_type: &'a str,
+    pub target_id: &'a [u8; 16],
+    pub reason: &'a str,
+}
+
+fn revocation_request_fields<'a>(request: &RevocationRequest<'a>) -> [&'a [u8]; 5] {
+    [
+        request.revocation_id,
+        request.analyst_id,
+        request.target_type.as_bytes(),
+        request.target_id,
+        request.reason.as_bytes(),
+    ]
+}
+
+/// Canonical bytes of an Analyst's revocation request.
+#[must_use]
+pub fn revocation_request_record(request: &RevocationRequest<'_>) -> Vec<u8> {
+    encode_fields(
+        REVOCATION_REQUEST_RECORD_DOMAIN,
+        &revocation_request_fields(request),
+    )
+}
+
+/// Digest signed under [`REVOCATION_REQUEST_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn revocation_request_digest(request: &RevocationRequest<'_>) -> Digest32 {
+    sha256(&revocation_request_record(request))
+}
+
+/// Canonical bytes of a Moderator's revocation decision.
+///
+/// Binds every field of the request as stored, the deciding Moderator and
+/// the verdict, so the stored signature can be checked later from the
+/// `revocation` row alone.
+#[must_use]
+pub fn revocation_decision_record(
+    request: &RevocationRequest<'_>,
+    moderator_id: &[u8; 16],
+    decision: RevocationDecision,
+) -> Vec<u8> {
+    let [revocation_id, analyst_id, target_type, target_id, reason] =
+        revocation_request_fields(request);
+    encode_fields(
+        REVOCATION_DECISION_RECORD_DOMAIN,
+        &[
+            revocation_id,
+            analyst_id,
+            target_type,
+            target_id,
+            reason,
+            moderator_id,
+            decision.as_str().as_bytes(),
+        ],
+    )
+}
+
+/// Digest signed under [`REVOCATION_DECISION_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn revocation_decision_digest(
+    request: &RevocationRequest<'_>,
+    moderator_id: &[u8; 16],
+    decision: RevocationDecision,
+) -> Digest32 {
+    sha256(&revocation_decision_record(request, moderator_id, decision))
 }

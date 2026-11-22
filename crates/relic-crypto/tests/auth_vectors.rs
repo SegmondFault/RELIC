@@ -72,6 +72,56 @@ fn challenge_json(challenge: &auth::AuthChallenge) -> Value {
     })
 }
 
+/// One signed revocation request and an approved and a rejected decision on it.
+fn revocation_vectors(
+    moderator_id: &[u8; 16],
+    moderator_seed: [u8; 32],
+) -> (Vec<Value>, Vec<Value>) {
+    let revocation_id = *b"\x5b\x1f\x0c\x93\x2e\x64\x4a\x0d\xb1\x7c\x08\xe2\x55\x3d\x91\xa4";
+    let analyst_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
+    let target_id = *b"\xc2\x48\x6a\x1e\x90\x3b\x4d\x75\x8f\x26\xe0\x14\x7d\xb9\x52\x0f";
+    let revocation = auth::RevocationRequest {
+        revocation_id: &revocation_id,
+        analyst_id: &analyst_id,
+        target_type: "user",
+        target_id: &target_id,
+        reason: "Key reported lost — Schlüssel verloren",
+    };
+    let revocation_json = json!({
+        "revocation_id": hex(&revocation_id),
+        "analyst_id": hex(&analyst_id),
+        "target_type": revocation.target_type,
+        "target_id": hex(&target_id),
+        "reason": revocation.reason,
+    });
+    let revocation_requests = vec![signed_case(
+        "revocation-request",
+        [0x55; 32],
+        &auth::revocation_request_record(&revocation),
+        auth::REVOCATION_REQUEST_SIGNATURE_DOMAIN,
+        revocation_json.clone(),
+    )];
+    let revocation_decisions: Vec<Value> = [
+        ("revocation-approved", auth::Decision::Approved),
+        ("revocation-rejected", auth::Decision::Rejected),
+    ]
+    .into_iter()
+    .map(|(name, decision)| {
+        let mut inputs = revocation_json.clone();
+        inputs["moderator_id"] = json!(hex(moderator_id));
+        inputs["decision"] = json!(decision.as_str());
+        signed_case(
+            name,
+            moderator_seed,
+            &auth::revocation_decision_record(&revocation, moderator_id, decision),
+            auth::REVOCATION_DECISION_SIGNATURE_DOMAIN,
+            inputs,
+        )
+    })
+    .collect();
+    (revocation_requests, revocation_decisions)
+}
+
 fn build_vectors() -> Value {
     let challenge = challenge();
 
@@ -167,9 +217,14 @@ fn build_vectors() -> Value {
         ));
     }
 
+    let (revocation_requests, revocation_decisions) =
+        revocation_vectors(&moderator_id, moderator_seed);
+
     json!({
         "format": "relic-auth-vectors/1",
         "registration_decision": decisions,
+        "revocation_request": revocation_requests,
+        "revocation_decision": revocation_decisions,
         "encode_fields": [{
             "domain": "RELIC:test:v1",
             "fields": [hex(b"ab"), hex(b"c"), ""],

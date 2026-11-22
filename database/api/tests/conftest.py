@@ -84,14 +84,14 @@ class Database:
         revocation_id = self.execute(
             "INSERT INTO catalogue.revocation"
             " (analyst_request_id, target_type, target_id, reason, request_signature)"
-            " VALUES (%s, 'user', %s, 'test', '\\x01') RETURNING revocation_id",
-            (requester.user_id, user_id),
+            " VALUES (%s, 'user', %s, 'test', %s) RETURNING revocation_id",
+            (requester.user_id, user_id, b"\x01" * 64),
         )[0][0]
         self.execute(
             "UPDATE catalogue.revocation SET moderator_id = %s, decision = 'approved',"
-            " decided_at = clock_timestamp(), decision_signature = '\\x02'"
+            " decided_at = clock_timestamp(), decision_signature = %s"
             " WHERE revocation_id = %s",
-            (moderator.user_id, revocation_id),
+            (moderator.user_id, b"\x02" * 64, revocation_id),
         )
 
 

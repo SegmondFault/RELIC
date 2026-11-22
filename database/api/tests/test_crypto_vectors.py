@@ -95,6 +95,33 @@ def test_registration_decision_vectors(case):
     _check_signed_case(case, record, crypto.REGISTRATION_DECISION_SIGNATURE_DOMAIN)
 
 
+def _revocation(inputs: dict) -> crypto.RevocationRequest:
+    return crypto.RevocationRequest(
+        revocation_id=uuid.UUID(hex=inputs["revocation_id"]),
+        analyst_id=uuid.UUID(hex=inputs["analyst_id"]),
+        target_type=inputs["target_type"],
+        target_id=uuid.UUID(hex=inputs["target_id"]),
+        reason=inputs["reason"],
+    )
+
+
+@pytest.mark.parametrize("case", VECTORS["revocation_request"], ids=lambda case: case["name"])
+def test_revocation_request_vectors(case):
+    record = crypto.revocation_request_record(_revocation(case["inputs"]))
+    _check_signed_case(case, record, crypto.REVOCATION_REQUEST_SIGNATURE_DOMAIN)
+
+
+@pytest.mark.parametrize("case", VECTORS["revocation_decision"], ids=lambda case: case["name"])
+def test_revocation_decision_vectors(case):
+    inputs = case["inputs"]
+    record = crypto.revocation_decision_record(
+        _revocation(inputs),
+        moderator_id=uuid.UUID(hex=inputs["moderator_id"]),
+        decision=inputs["decision"],
+    )
+    _check_signed_case(case, record, crypto.REVOCATION_DECISION_SIGNATURE_DOMAIN)
+
+
 def test_small_order_public_key_is_rejected():
     # The identity point: any "signature" with R = identity and S = 0 would
     # verify under a non-strict verifier.

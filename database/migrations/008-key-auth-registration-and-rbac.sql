@@ -12,8 +12,10 @@
 --   account; system accounts and the first Moderator are created by the
 --   database operator as relic_owner.
 -- * Account role is immutable, Ed25519 keys are exactly 32 bytes and unique.
--- * Revocation decisions are final, timestamped by the database, and a
---   Moderator cannot decide a revocation of their own account.
+-- * Revocation requests and decisions carry 64-byte Ed25519 signatures,
+--   decisions are final and timestamped by the database, a Moderator cannot
+--   decide a revocation of their own account, a target has at most one open
+--   request, and an already revoked target cannot be requested again.
 -- * FIDBF, BSim and provenance submitters must be Analysts.
 -- * Signed evidence tables are no longer updatable by relic_app.
 
@@ -347,6 +349,17 @@ $$;
 -- Revocation: final, database-timestamped, never self-decided
 -- ---------------------------------------------------------------------------
 
+ALTER TABLE revocation
+    ADD CONSTRAINT revocation_request_signature_ed25519
+        CHECK (octet_length(request_signature) = 64),
+    ADD CONSTRAINT revocation_decision_signature_ed25519
+        CHECK (decision_signature IS NULL OR octet_length(decision_signature) = 64);
+
+-- At most one open request per target; the API reports a duplicate as 409.
+CREATE UNIQUE INDEX revocation_open_target_idx
+    ON revocation (target_type, target_id)
+    WHERE decision IS NULL;
+
 CREATE FUNCTION guard_revocation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -362,6 +375,15 @@ BEGIN
         IF NEW.decision IS NOT NULL THEN
             RAISE EXCEPTION 'A revocation request must start pending'
                 USING ERRCODE = 'check_violation';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM revocation
+             WHERE target_type = NEW.target_type
+               AND target_id = NEW.target_id
+               AND decision = 'approved'
+        ) THEN
+            RAISE EXCEPTION 'Target %.% is already revoked', NEW.target_type, NEW.target_id
+                USING ERRCODE = 'unique_violation';
         END IF;
         NEW.requested_at := clock_timestamp();
         RETURN NEW;

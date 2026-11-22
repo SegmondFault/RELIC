@@ -9,6 +9,11 @@
 #   scripts/local-dev.sh approve|reject <request_id> <moderator_key>
 #                                                   log in as the Moderator (by key), sign and
 #                                                   submit the decision through the running API
+#   scripts/local-dev.sh revoke <target_type> <target_id> <analyst_key> <reason>
+#                                                   log in as the Analyst, sign and submit a
+#                                                   revocation request
+#   scripts/local-dev.sh approve-revocation|reject-revocation <revocation_id> <moderator_key>
+#                                                   sign and submit a revocation decision
 #   scripts/local-dev.sh api                        run the API on http://127.0.0.1:8000 (foreground)
 #   scripts/local-dev.sh psql                       open psql on the dev database as superuser
 #   scripts/local-dev.sh down                       remove the Postgres container and its data
@@ -88,37 +93,65 @@ SELECT registration_request_id, requested_role, name, organisation, email,
 SQL
 }
 
-cmd_decide() {
-    local decision="$1"; shift
-    (( $# == 2 )) || {
-        echo "usage: $0 ${decision%d} <request_id> <moderator_key>" >&2; exit 2;
-    }
-    local request_id="$1" key="$2"
-    require_uuid "$request_id"
-    local api="http://127.0.0.1:${api_port}/v1"
-    local signer="$repo_dir/target/debug/relic-sign-challenge"
+signer="$repo_dir/target/debug/relic-sign-challenge"
+api="http://127.0.0.1:${api_port}/v1"
+
+json_field() {
+    python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
+}
+
+# Log in by key through the running API; sets $token and $user_id.
+login_as() {
+    local key="$1" work="$2"
     [[ -x "$signer" ]] || cargo build -q -p relic-ingest --bin relic-sign-challenge
+    curl -sS --fail-with-body -X POST "$api/auth/challenge" -H 'content-type: application/json' \
+        -d '{"purpose":"login"}' > "$work/challenge.json"
+    "$signer" login --challenge "$work/challenge.json" --key "$key" > "$work/login.json"
+    token="$(curl -sS --fail-with-body -X POST "$api/auth/login" \
+        -H 'content-type: application/json' -d @"$work/login.json" | json_field access_token)"
+    user_id="$(curl -sS --fail-with-body "$api/me" -H "authorization: Bearer $token" \
+        | json_field user_id)"
+}
+
+# cmd_decide <registration|revocation> <approved|rejected> <id> <moderator_key>
+cmd_decide() {
+    local kind="$1" decision="$2"; shift 2
+    local verb="${decision%d}"
+    [[ "$kind" == revocation ]] && verb="$verb-revocation"
+    (( $# == 2 )) || { echo "usage: $0 $verb <${kind}_id> <moderator_key>" >&2; exit 2; }
+    local id="$1" key="$2" token user_id
+    require_uuid "$id"
     local work; work="$(mktemp -d)"
     # shellcheck disable=SC2064
     trap "rm -rf '$work'" RETURN
 
-    curl -sS --fail-with-body -X POST "$api/auth/challenge" -H 'content-type: application/json' \
-        -d '{"purpose":"login"}' > "$work/challenge.json"
-    "$signer" login --challenge "$work/challenge.json" --key "$key" > "$work/login.json"
-    local token
-    token="$(curl -sS --fail-with-body -X POST "$api/auth/login" \
-        -H 'content-type: application/json' -d @"$work/login.json" \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')"
-    local moderator_id
-    moderator_id="$(curl -sS --fail-with-body "$api/me" -H "authorization: Bearer $token" \
-        | python3 -c 'import json, sys; print(json.load(sys.stdin)["user_id"])')"
-    curl -sS --fail-with-body "$api/registrations/$request_id" \
+    login_as "$key" "$work"
+    curl -sS --fail-with-body "$api/${kind}s/$id" \
         -H "authorization: Bearer $token" > "$work/request.json"
-    "$signer" decide-registration --request "$work/request.json" --moderator-id "$moderator_id" \
+    "$signer" "decide-$kind" --request "$work/request.json" --moderator-id "$user_id" \
         --decision "$decision" --key "$key" > "$work/decision.json"
-    curl -sS --fail-with-body -X POST "$api/registrations/$request_id/decision" \
+    curl -sS --fail-with-body -X POST "$api/${kind}s/$id/decision" \
         -H "authorization: Bearer $token" -H 'content-type: application/json' \
         -d @"$work/decision.json"
+    echo
+}
+
+cmd_revoke() {
+    (( $# == 4 )) || {
+        echo "usage: $0 revoke <target_type> <target_id> <analyst_key> <reason>" >&2; exit 2;
+    }
+    local target_type="$1" target_id="$2" key="$3" reason="$4" token user_id
+    require_uuid "$target_id"
+    local work; work="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+
+    login_as "$key" "$work"
+    "$signer" request-revocation --analyst-id "$user_id" --target-type "$target_type" \
+        --target-id "$target_id" --reason "$reason" --key "$key" > "$work/revocation.json"
+    curl -sS --fail-with-body -X POST "$api/revocations" \
+        -H "authorization: Bearer $token" -H 'content-type: application/json' \
+        -d @"$work/revocation.json"
     echo
 }
 
@@ -150,10 +183,13 @@ case "${1:-}" in
     up) cmd_up ;;
     bootstrap-moderator) shift; cmd_bootstrap_moderator "$@" ;;
     pending) cmd_pending ;;
-    approve) shift; cmd_decide approved "$@" ;;
-    reject) shift; cmd_decide rejected "$@" ;;
+    approve) shift; cmd_decide registration approved "$@" ;;
+    reject) shift; cmd_decide registration rejected "$@" ;;
+    revoke) shift; cmd_revoke "$@" ;;
+    approve-revocation) shift; cmd_decide revocation approved "$@" ;;
+    reject-revocation) shift; cmd_decide revocation rejected "$@" ;;
     api) cmd_api ;;
     psql) shift; psql --no-psqlrc "$super_uri/relic" "$@" ;;
     down) cmd_down ;;
-    *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

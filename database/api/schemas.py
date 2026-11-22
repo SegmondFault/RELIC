@@ -125,3 +125,66 @@ class RegistrationDecisionResponse(BaseModel):
     decision: Literal["approved", "rejected"]
     decided_at: datetime
     user_id: UUID | None
+
+
+# ---------------------------------------------------------------------------
+# Revocations
+# ---------------------------------------------------------------------------
+
+# catalogue.corpus_target_type, in enum order.
+TargetType = Literal[
+    "user",
+    "source",
+    "batch",
+    "binary",
+    "function",
+    "fidbf",
+    "bsim",
+    "provenance",
+    "license_assertion",
+    "software_component",
+    "software_release",
+    "binary_component_assertion",
+    "behavioural_composition",
+    "classification",
+    "flag",
+]
+RevocationStatus = Literal["pending", "approved", "rejected"]
+Reason = Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(_clean_text)]
+
+
+class RevocationRequest(_Request):
+    revocation_id: UUID = Field(description="Chosen by the Analyst; makes the request single-use")
+    analyst_id: UUID = Field(description="The requesting Analyst: must be the caller")
+    target_type: TargetType
+    target_id: UUID
+    reason: Reason
+    signature: HexSignature
+
+
+class RevocationDetail(BaseModel):
+    """A revocation request as stored, in the shape `decide-revocation` signs."""
+
+    revocation_id: UUID
+    status: RevocationStatus
+    analyst_id: UUID
+    target_type: TargetType
+    target_id: UUID
+    reason: str
+    requested_at: datetime
+    request_signature: str = Field(description="Analyst's signature, lowercase hex")
+    moderator_id: UUID | None
+    decided_at: datetime | None
+    decision_signature: str | None = Field(description="Moderator's signature, lowercase hex")
+
+
+class RevocationDecisionRequest(_Request):
+    moderator_id: UUID
+    decision: Literal["approved", "rejected"]
+    signature: HexSignature
+
+
+class RevocationDecisionResponse(BaseModel):
+    revocation_id: UUID
+    decision: Literal["approved", "rejected"]
+    decided_at: datetime
