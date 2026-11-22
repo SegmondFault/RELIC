@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RELIC API reference: identity, RBAC and security</title>
+<!-- Source of relic-api-reference.pdf. Render with:
+     chromium --headless --no-pdf-header-footer --print-to-pdf=relic-api-reference.pdf relic-api-reference.html -->
+<style>
+  @page { size: A4; margin: 15mm 16mm 15mm 16mm; }
+  :root {
+    --ink: #1a1d23; --muted: #5b6472; --line: #d7dbe2; --soft: #f4f5f7;
+    --blue: #2f5bd3; --blue-bg: #e8eefc; --amber: #a86a12; --amber-bg: #fdf3e1;
+    --green: #1f7a45; --green-bg: #e3f4ea; --red: #b42828; --red-bg: #fde8e8;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font-family: Inter, system-ui, sans-serif; color: var(--ink); font-size: 10pt; line-height: 1.45; margin: 0; }
+  code, .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 0.86em; }
+  .kicker { font: 600 8pt "DejaVu Sans Mono", monospace; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+  h1 { font-size: 22pt; margin: 4px 0 6px; letter-spacing: -.01em; }
+  h2 { font-size: 13.5pt; margin: 16px 0 6px; break-after: avoid; }
+  h2 .n { color: var(--blue); font: 700 10pt "DejaVu Sans Mono", monospace; margin-right: 6px; }
+  h3 { font-size: 10.5pt; margin: 14px 0 6px; break-after: avoid; }
+  p { margin: 0 0 8px; }
+  .lead { color: #343a46; font-size: 10.5pt; }
+  .muted { color: var(--muted); }
+  .small { font-size: 8.5pt; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; break-inside: avoid; }
+  .fig { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 6px 0 10px; break-inside: avoid; }
+  .fig svg { width: 100%; height: auto; display: block; }
+  .fig .cap { font-size: 8pt; color: var(--muted); margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 9pt; margin: 4px 0 10px; break-inside: auto; }
+  th { text-align: left; font-size: 7.5pt; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: var(--soft); padding: 6px 8px; font-weight: 600; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr { break-inside: avoid; }
+  table.keep { break-inside: avoid; }
+  .tag { display: inline-block; font: 600 7.5pt Inter, sans-serif; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+  .live { background: var(--green-bg); color: var(--green); }
+  .stub { background: var(--soft); color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .step { border-radius: 8px; padding: 8px 10px; font-size: 8.6pt; break-inside: avoid; }
+  .step b { display: block; font-size: 9.2pt; margin-bottom: 3px; }
+  .step .who { font: 700 7.2pt Inter; letter-spacing: .06em; text-transform: uppercase; }
+  .b { background: var(--blue-bg); border: 1px solid #b9c8f3; } .b .who { color: var(--blue); }
+  .g { background: var(--soft); border: 1px solid var(--line); } .g .who { color: var(--muted); }
+  .a { background: var(--amber-bg); border: 1px solid #efd3a4; } .a .who { color: var(--amber); }
+  .gr { background: var(--green-bg); border: 1px solid #b5dec6; } .gr .who { color: var(--green); }
+  .bytes { display: flex; font: 8pt "DejaVu Sans Mono", monospace; margin: 4px 0; }
+  .bytes span { border: 1px solid var(--line); padding: 4px 6px; flex: 1; text-align: center; background: #fff; }
+  .bytes span + span { border-left: 0; }
+  .bytes .d1 { background: var(--blue-bg); flex: 1.6; }
+  .bytes .d2 { background: var(--amber-bg); flex: 1.6; }
+  .bytes .k { background: var(--green-bg); }
+  .rowlab { font: 600 8pt Inter; color: var(--muted); width: 70px; flex: none !important; border: 0 !important; background: none !important; text-align: left !important; padding-left: 0 !important; }
+  .layers td:first-child { width: 120px; font-weight: 600; }
+  .layers td:first-child span { display: block; font-weight: 400; color: var(--muted); font-size: 7.8pt; }
+  .chip { display: inline-block; border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; margin: 1px 2px 2px 0; font-size: 8pt; background: #fff; }
+  .note { background: var(--blue-bg); border-left: 3px solid var(--blue); padding: 7px 10px; border-radius: 4px; font-size: 9pt; margin: 6px 0 10px; break-inside: avoid; }
+  .warn { background: var(--amber-bg); border-left-color: var(--amber); }
+  .y { color: var(--green); font-weight: 700; text-align: center; } .x { color: #c3c8d0; text-align: center; }
+  pre { background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: 7.9pt/1.5 "DejaVu Sans Mono", monospace; margin: 4px 0 10px; white-space: pre-wrap; break-inside: avoid; }
+  .pb { break-before: page; }
+</style>
+</head>
+<body>
+
+<div class="kicker">RELIC · API reference · branch feature/api-endpoints-rbac · as of 22 Nov 2026</div>
+<h1>How the RELIC API works</h1>
+<p class="lead">RELIC has no passwords. Every person and worker is an <b>Ed25519 public key</b> with one fixed role.
+You get an account by asking for one with your own key; a Moderator approves it with a signature. You log in by
+signing a one-time server challenge, and the account is found by the key alone. A session token only opens routes;
+anything that changes data must be <b>signed by the account's key</b> and is re-checked by PostgreSQL.</p>
+
+<h2><span class="n">01</span>Architecture and trust boundaries</h2>
+<div class="fig">
+<svg viewBox="0 0 760 190" font-family="Inter, sans-serif" font-size="11">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6472"/></marker></defs>
+  <!-- client -->
+  <rect x="4" y="8" width="180" height="170" rx="8" fill="#e8eefc" stroke="#2f5bd3"/>
+  <text x="16" y="30" font-weight="700" font-size="12">User's machine</text>
+  <text x="16" y="48" fill="#5b6472">OpenSSH Ed25519 private key</text>
+  <text x="16" y="62" fill="#5b6472">never leaves this machine</text>
+  <rect x="14" y="76" width="160" height="62" rx="6" fill="#fff" stroke="#2f5bd3"/>
+  <text x="22" y="94" font-family="DejaVu Sans Mono" font-size="10" font-weight="700">relic-sign-challenge</text>
+  <text x="22" y="110" font-size="10" fill="#343a46">login · register</text>
+  <text x="22" y="124" font-size="10" fill="#343a46">decide-registration</text>
+  <text x="16" y="158" font-size="9.5" fill="#5b6472">builds canonical bytes, signs,</text>
+  <text x="16" y="171" font-size="9.5" fill="#5b6472">prints the JSON body to send</text>
+  <!-- caddy -->
+  <rect x="222" y="8" width="138" height="170" rx="8" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="234" y="30" font-weight="700" font-size="12">Caddy</text>
+  <text x="234" y="50" fill="#343a46">TLS 1.2/1.3, HSTS</text>
+  <text x="234" y="66" fill="#343a46">1 MB body cap</text>
+  <text x="234" y="82" fill="#343a46">CSP, no-store</text>
+  <text x="234" y="98" fill="#343a46">overwrites</text>
+  <text x="234" y="112" fill="#343a46">X-Forwarded-For</text>
+  <text x="234" y="166" font-size="9.5" fill="#5b6472">only public container</text>
+  <!-- api -->
+  <rect x="398" y="8" width="180" height="170" rx="8" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="410" y="30" font-weight="700" font-size="12">FastAPI · relic_app</text>
+  <text x="410" y="50" fill="#343a46">challenges, login, tokens</text>
+  <text x="410" y="66" fill="#343a46">registration + decisions</text>
+  <text x="410" y="82" fill="#343a46">Ed25519 verify (libsodium)</text>
+  <text x="410" y="98" fill="#343a46">route role guards</text>
+  <text x="410" y="114" fill="#343a46">rate / body limits, headers</text>
+  <text x="410" y="152" font-size="9.5" fill="#5b6472">read-only container, no caps,</text>
+  <text x="410" y="166" font-size="9.5" fill="#5b6472">internal network only</text>
+  <!-- db -->
+  <rect x="616" y="8" width="140" height="170" rx="8" fill="#e3f4ea" stroke="#1f7a45"/>
+  <text x="628" y="30" font-weight="700" font-size="12">PostgreSQL</text>
+  <text x="628" y="50" fill="#343a46">schema catalogue</text>
+  <text x="628" y="66" fill="#343a46">triggers enforce roles,</text>
+  <text x="628" y="80" fill="#343a46">finality, immutability</text>
+  <text x="628" y="96" fill="#343a46">relic_app: append-only</text>
+  <text x="628" y="112" fill="#343a46">on signed evidence</text>
+  <text x="628" y="166" font-size="9.5" fill="#5b6472">last line of defence</text>
+  <!-- arrows -->
+  <line x1="184" y1="93" x2="220" y2="93" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text x="187" y="86" font-size="9" fill="#5b6472">HTTPS</text>
+  <line x1="360" y1="93" x2="396" y2="93" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text x="365" y="86" font-size="9" fill="#5b6472">HTTP</text>
+  <line x1="578" y1="93" x2="614" y2="93" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar)"/>
+  <text x="586" y="86" font-size="9" fill="#5b6472">TLS*</text>
+</svg>
+<div class="cap">* The API refuses to start against a non-local database without <code>sslmode=require|verify-ca|verify-full</code>.
+The signed formats live in <code>crates/relic-crypto/src/auth.rs</code> (Rust) and are mirrored in <code>database/api/crypto.py</code>; both sides are pinned to <code>auth-v1.json</code> test vectors.</div>
+</div>
+
+<h2><span class="n">02</span>Identities and roles (RBAC)</h2>
+<p>An identity is a row in <code>catalogue.user_public</code>: a random <b>User ID</b>, a unique 32-byte <b>public key</b>,
+an <b>owner type</b> and a <b>role</b>. All four are immutable. Contact details (name, organisation, email) sit in
+<code>user_private</code> and are shown only to Moderators reviewing registrations. Nothing is deleted: a revoked
+account stays visible, marked revoked.</p>
+
+<table>
+  <tr><th>Capability</th><th style="width:62px">Viewer</th><th style="width:62px">Analyst</th><th style="width:72px">Moderator</th><th style="width:62px">System</th><th style="width:70px">Status</th></tr>
+  <tr><td>Log in, read catalogue (<code>GET /v1/…</code>)</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">/users live</span></td></tr>
+  <tr><td>Flag a catalogue object</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Submit sources, batches, FIDBF, BSim, provenance, licences, classifications</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Respond to flags · request revocations</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Review and decide registrations</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Decide revocations (never their own)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Sign integrity-chain entries and MMR checkpoints (workers)</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="muted small">outside API</td></tr>
+</table>
+<p class="small muted"><b>Roles are exclusive, not ranked:</b> a Moderator cannot submit corpus data and an Analyst cannot flag.
+System accounts have no role and never get a session. Infrastructure admins run the server but have no RELIC identity,
+so server access never lets anyone sign as a user.</p>
+
+<h3>Every write passes four independent gates</h3>
+<div class="fig">
+<svg viewBox="0 0 760 92" font-family="Inter, sans-serif" font-size="10.5">
+  <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6472"/></marker></defs>
+  <g>
+    <rect x="2" y="6" width="170" height="80" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+    <text x="12" y="26" font-weight="700">1 · Token</text>
+    <text x="12" y="44" fill="#343a46">HS256 JWT, 8 h, aud/iss</text>
+    <text x="12" y="58" fill="#343a46">bound to this host</text>
+    <text x="12" y="76" font-size="9" fill="#5b6472">deps.py · 401</text>
+  </g>
+  <line x1="172" y1="46" x2="192" y2="46" stroke="#5b6472" stroke-width="1.3" marker-end="url(#ar2)"/>
+  <g>
+    <rect x="194" y="6" width="176" height="80" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+    <text x="204" y="26" font-weight="700">2 · Account, re-read</text>
+    <text x="204" y="44" fill="#343a46">every request: human, has a</text>
+    <text x="204" y="58" fill="#343a46">role, not revoked</text>
+    <text x="204" y="76" font-size="9" fill="#5b6472">revocation is instant · 401</text>
+  </g>
+  <line x1="370" y1="46" x2="390" y2="46" stroke="#5b6472" stroke-width="1.3" marker-end="url(#ar2)"/>
+  <g>
+    <rect x="392" y="6" width="170" height="80" rx="7" fill="#e8eefc" stroke="#2f5bd3"/>
+    <text x="402" y="26" font-weight="700">3 · Route + signature</text>
+    <text x="402" y="44" fill="#343a46">role guard on the route;</text>
+    <text x="402" y="58" fill="#343a46">body signed by caller's key</text>
+    <text x="402" y="76" font-size="9" fill="#5b6472">403 · keys in body never trusted</text>
+  </g>
+  <line x1="562" y1="46" x2="582" y2="46" stroke="#5b6472" stroke-width="1.3" marker-end="url(#ar2)"/>
+  <g>
+    <rect x="584" y="6" width="174" height="80" rx="7" fill="#e3f4ea" stroke="#1f7a45"/>
+    <text x="594" y="26" font-weight="700">4 · Database</text>
+    <text x="594" y="44" fill="#343a46">triggers check exact role,</text>
+    <text x="594" y="58" fill="#343a46">finality; privileges limit</text>
+    <text x="594" y="76" font-size="9" fill="#5b6472">holds even if the API is hostile</text>
+  </g>
+</svg>
+<div class="cap">A token decides which routes a caller can reach; it never authorises a write by itself. The signature is verified with the key registered for the claimed User ID, over versioned, domain-separated bytes, in the same transaction as the insert.</div>
+</div>
+
+<h2><span class="n">03</span>Registration: bring your own key, a Moderator decides</h2>
+<p>Registering does not create an account. The applicant proves they hold a key and asks for a role; the request is
+<b>pending</b> until an active Moderator signs a verdict. RELIC never generates, receives or stores private keys.</p>
+<div class="grid4">
+  <div class="step b"><span class="who">1 · Applicant</span><b>Generate and sign</b>
+    <code>ssh-keygen -t ed25519</code><br>get a <i>registration</i> challenge, sign challenge + public key + role, name, org, email<br><code>sign-challenge register</code></div>
+  <div class="step g"><span class="who">2 · API</span><b>POST /v1/accounts</b>
+    consume challenge (single use)<br>verify with the key in the request = proof of possession<br>insert pending row → <b>202</b><br>409 if key has an account or open request</div>
+  <div class="step a"><span class="who">3 · Moderator</span><b>Review and sign</b>
+    <code>GET /v1/registrations/{id}</code><br>tool prints exactly what is approved, then signs request + own User ID + verdict<br><code>sign-challenge decide-registration</code></div>
+  <div class="step gr"><span class="who">4 · API + DB</span><b>One transaction</b>
+    moderator_id = caller?<br>verify with Moderator's registered key over the <i>stored</i> row<br><code>decide_registration()</code> → account + User ID</div>
+</div>
+<div class="fig" style="margin-top:10px">
+<svg viewBox="0 0 760 96" font-family="Inter, sans-serif" font-size="10.5">
+  <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6472"/></marker></defs>
+  <text x="6" y="16" font-weight="700" font-size="10">States of a registration request</text>
+  <rect x="150" y="34" width="110" height="30" rx="15" fill="#f4f5f7" stroke="#5b6472"/>
+  <text x="205" y="53" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10.5">pending</text>
+  <path d="M260,44 C300,28 320,22 360,22" fill="none" stroke="#5b6472" stroke-width="1.3" marker-end="url(#ar3)"/>
+  <path d="M260,54 C300,70 320,76 360,76" fill="none" stroke="#5b6472" stroke-width="1.3" marker-end="url(#ar3)"/>
+  <text x="268" y="52" font-size="9" fill="#5b6472">signed by an active Moderator</text>
+  <rect x="362" y="8" width="110" height="28" rx="14" fill="#e3f4ea" stroke="#1f7a45"/>
+  <text x="417" y="26" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10.5">approved</text>
+  <rect x="362" y="62" width="110" height="28" rx="14" fill="#fde8e8" stroke="#b42828"/>
+  <text x="417" y="80" text-anchor="middle" font-family="DejaVu Sans Mono" font-size="10.5">rejected</text>
+  <text x="484" y="26" fill="#343a46">creates user_public + user_private (role as requested)</text>
+  <text x="484" y="80" fill="#343a46">no account; the same key may apply again</text>
+  <text x="6" y="50" font-size="9" fill="#5b6472">final, never edited</text>
+  <text x="6" y="63" font-size="9" fill="#5b6472">or deleted</text>
+</svg>
+<div class="cap">The first Moderator and system accounts are created by the database operator as <code>relic_owner</code> (<code>local-dev.sh bootstrap-moderator</code>); the API cannot create them. <code>decide_registration()</code> is the only path by which <code>relic_app</code> can create a human account.</div>
+</div>
+
+<h2><span class="n">04</span>Login: sign a challenge, identified by your key</h2>
+<p>The client names itself <b>only by its public key</b>; challenges are bound to no account. After login,
+<code>GET /v1/me</code> returns the User ID and role.</p>
+<div class="fig">
+<svg viewBox="0 0 760 262" font-family="Inter, sans-serif" font-size="10.5">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#1a1d23"/></marker>
+    <marker id="a4m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6472"/></marker>
+  </defs>
+  <rect x="50" y="4" width="130" height="26" rx="6" fill="#e8eefc" stroke="#2f5bd3"/><text x="115" y="21" text-anchor="middle" font-weight="700">Client</text>
+  <rect x="330" y="4" width="130" height="26" rx="6" fill="#f4f5f7" stroke="#d7dbe2"/><text x="395" y="21" text-anchor="middle" font-weight="700">RELIC API</text>
+  <rect x="610" y="4" width="130" height="26" rx="6" fill="#e3f4ea" stroke="#1f7a45"/><text x="675" y="21" text-anchor="middle" font-weight="700">PostgreSQL</text>
+  <line x1="115" y1="30" x2="115" y2="258" stroke="#c3c8d0" stroke-dasharray="4 4"/>
+  <line x1="395" y1="30" x2="395" y2="258" stroke="#c3c8d0" stroke-dasharray="4 4"/>
+  <line x1="675" y1="30" x2="675" y2="258" stroke="#c3c8d0" stroke-dasharray="4 4"/>
+
+  <circle cx="20" cy="52" r="9" fill="#2f5bd3"/><text x="20" y="56" text-anchor="middle" fill="#fff" font-size="9.5" font-weight="700">1</text>
+  <text x="124" y="47" font-family="DejaVu Sans Mono" font-size="9.5">POST /v1/auth/challenge {purpose:"login"}</text>
+  <line x1="115" y1="54" x2="393" y2="54" stroke="#1a1d23" stroke-width="1.2" marker-end="url(#a4)"/>
+  <text x="404" y="66" font-size="9.5">INSERT auth_challenge: 32-byte nonce, 120 s, audience</text>
+  <line x1="395" y1="72" x2="673" y2="72" stroke="#1a1d23" stroke-width="1.2" marker-end="url(#a4)"/>
+  <text x="124" y="88" font-size="9.5">201 · challenge_id, nonce, audience, expires_at</text>
+  <line x1="393" y1="94" x2="117" y2="94" stroke="#5b6472" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#a4m)"/>
+
+  <circle cx="20" cy="118" r="9" fill="#2f5bd3"/><text x="20" y="122" text-anchor="middle" fill="#fff" font-size="9.5" font-weight="700">2</text>
+  <rect x="40" y="104" width="250" height="28" rx="6" fill="#e8eefc" stroke="#2f5bd3"/>
+  <text x="50" y="122" font-size="9.5"><tspan font-weight="700">sign-challenge login</tspan>: sign challenge + public key</text>
+
+  <circle cx="20" cy="156" r="9" fill="#2f5bd3"/><text x="20" y="160" text-anchor="middle" fill="#fff" font-size="9.5" font-weight="700">3</text>
+  <text x="124" y="151" font-family="DejaVu Sans Mono" font-size="9.5">POST /v1/auth/login {challenge_id, public_key, signature}</text>
+  <line x1="115" y1="158" x2="393" y2="158" stroke="#1a1d23" stroke-width="1.2" marker-end="url(#a4)"/>
+  <text x="404" y="172" font-size="9.5">a · consume challenge (burned even if b fails)</text>
+  <line x1="395" y1="178" x2="673" y2="178" stroke="#1a1d23" stroke-width="1.2" marker-end="url(#a4)"/>
+  <rect x="404" y="186" width="220" height="22" rx="5" fill="#fff" stroke="#1a1d23"/>
+  <text x="514" y="201" text-anchor="middle" font-size="9.5" font-weight="700">b · verify with the submitted key</text>
+  <text x="404" y="224" font-size="9.5">c · only now: look up account / request by key</text>
+  <line x1="395" y1="230" x2="673" y2="230" stroke="#1a1d23" stroke-width="1.2" marker-end="url(#a4)"/>
+
+  <circle cx="20" cy="250" r="9" fill="#2f5bd3"/><text x="20" y="254" text-anchor="middle" fill="#fff" font-size="9.5" font-weight="700">4</text>
+  <text x="124" y="244" font-size="9.5">200 bearer token · or 401 / 403 (see below)</text>
+  <line x1="393" y1="250" x2="117" y2="250" stroke="#5b6472" stroke-width="1.2" stroke-dasharray="5 3" marker-end="url(#a4m)"/>
+</svg>
+</div>
+
+<h3>What the login answers, and why it leaks nothing</h3>
+<div class="fig">
+<svg viewBox="0 0 760 250" font-family="Inter, sans-serif" font-size="10.5">
+  <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="#5b6472"/></marker></defs>
+  <!-- gate -->
+  <rect x="4" y="6" width="250" height="40" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="14" y="23" font-weight="700">Challenge live and unused, and</text>
+  <text x="14" y="38">signature valid for the submitted key?</text>
+  <line x1="254" y1="26" x2="440" y2="26" stroke="#5b6472" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="272" y="20" font-size="9.5" fill="#b42828" font-weight="700">no</text>
+  <rect x="442" y="10" width="314" height="32" rx="6" fill="#fde8e8" stroke="#b42828"/>
+  <text x="452" y="25" font-weight="700" fill="#b42828">401 Authentication failed</text>
+  <text x="452" y="37" font-size="9" fill="#5b6472">identical for unknown key, wrong signature, spent challenge</text>
+
+  <line x1="129" y1="46" x2="129" y2="76" stroke="#5b6472" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="136" y="64" font-size="9.5" fill="#1f7a45" font-weight="700">yes</text>
+  <line x1="4" y1="70" x2="756" y2="70" stroke="#2f5bd3" stroke-dasharray="5 4"/>
+  <text x="190" y="64" font-size="9" fill="#2f5bd3">caller has proven they hold the private key: answers below are only about their own key</text>
+
+  <rect x="4" y="80" width="250" height="34" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="14" y="101" font-weight="700">Account with this public key?</text>
+
+  <!-- no branch -->
+  <line x1="254" y1="97" x2="300" y2="97" stroke="#5b6472" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="262" y="91" font-size="9.5" fill="#b42828" font-weight="700">no</text>
+  <rect x="302" y="80" width="130" height="34" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="312" y="95" font-weight="700" font-size="10">Registration</text>
+  <text x="312" y="108" font-size="10">request for key?</text>
+  <line x1="432" y1="90" x2="440" y2="86" stroke="#5b6472"/><line x1="432" y1="97" x2="440" y2="118" stroke="#5b6472"/><line x1="432" y1="104" x2="440" y2="150" stroke="#5b6472"/>
+  <rect x="442" y="76" width="314" height="22" rx="5" fill="#fdf3e1" stroke="#a86a12"/>
+  <text x="452" y="91"><tspan font-weight="700">pending</tspan> → 403 Registration is pending approval</text>
+  <rect x="442" y="107" width="314" height="22" rx="5" fill="#fdf3e1" stroke="#a86a12"/>
+  <text x="452" y="122"><tspan font-weight="700">rejected</tspan> → 403 Registration was rejected</text>
+  <rect x="442" y="138" width="314" height="22" rx="5" fill="#fde8e8" stroke="#b42828"/>
+  <text x="452" y="153"><tspan font-weight="700">none</tspan> → 401 Authentication failed</text>
+
+  <!-- yes branch -->
+  <line x1="129" y1="114" x2="129" y2="176" stroke="#5b6472" stroke-width="1.3" marker-end="url(#a5)"/>
+  <text x="136" y="150" font-size="9.5" fill="#1f7a45" font-weight="700">yes</text>
+  <rect x="4" y="178" width="250" height="34" rx="7" fill="#f4f5f7" stroke="#d7dbe2"/>
+  <text x="14" y="199" font-weight="700">Revoked? Human with a role?</text>
+  <line x1="254" y1="186" x2="440" y2="181" stroke="#5b6472"/><line x1="254" y1="195" x2="440" y2="206" stroke="#5b6472"/><line x1="254" y1="204" x2="440" y2="231" stroke="#5b6472"/>
+  <rect x="442" y="170" width="314" height="22" rx="5" fill="#fdf3e1" stroke="#a86a12"/>
+  <text x="452" y="185"><tspan font-weight="700">revoked</tspan> → 403 Account has been revoked</text>
+  <rect x="442" y="195" width="314" height="22" rx="5" fill="#fde8e8" stroke="#b42828"/>
+  <text x="452" y="210"><tspan font-weight="700">system account</tspan> → 401 (never gets a session)</text>
+  <rect x="442" y="220" width="314" height="24" rx="5" fill="#e3f4ea" stroke="#1f7a45"/>
+  <text x="452" y="236"><tspan font-weight="700">active human</tspan> → 200 token, <tspan font-family="DejaVu Sans Mono" font-size="9.5">sub = user_id</tspan></text>
+</svg>
+<div class="cap">The signature is checked <i>before</i> any lookup, so without the private key every failure takes the same path and returns the same body. Issuing a challenge names no account, so it reveals nothing either.</div>
+</div>
+
+<h2><span class="n">05</span>What exactly gets signed</h2>
+<p>All three messages use the same construction. Every field is length-prefixed (<code>u64</code> big-endian), the record is
+hashed with SHA-256, and the digest is signed under a <b>second, purpose-specific domain</b>, so a signature for one purpose
+can never be replayed as another.</p>
+<div class="card" style="margin-bottom:10px">
+  <div class="bytes"><span class="rowlab">record</span><span class="d1">"RELIC:login-challenge:v1"</span><span>challenge_id 16 B</span><span>nonce 32 B</span><span>audience</span><span>expires_at i64</span><span class="k">public_key 32 B</span></div>
+  <div class="small muted" style="margin:2px 0 4px 70px">↓ SHA-256</div>
+  <div class="bytes"><span class="rowlab">message</span><span class="d2" style="flex:1.2">"RELIC:login-signature:v1"</span><span style="flex:1.3">digest 32 B</span><span style="flex:2.6;border:0;background:none"></span></div>
+  <div class="small muted" style="margin:2px 0 4px 70px">↓ Ed25519 sign → 64-byte signature, sent as lowercase hex</div>
+</div>
+<table>
+  <tr><th></th><th>Login</th><th>Registration proof</th><th>Registration decision</th></tr>
+  <tr><td><b>Signed by</b></td><td>account holder</td><td>applicant</td><td>Moderator</td></tr>
+  <tr><td><b>Domains</b></td><td class="mono">login-challenge:v1<br>login-signature:v1</td><td class="mono">registration-request:v1<br>registration-proof-signature:v1</td><td class="mono">registration-decision:v1<br>registration-decision-signature:v1</td></tr>
+  <tr><td><b>Fields</b></td><td>challenge + public key</td><td>challenge + public key, role, name, organisation?, email</td><td>request id, public key, role, name, organisation?, email, moderator_id, verdict</td></tr>
+  <tr><td><b>Verified with</b></td><td>the submitted key; account found by it afterwards</td><td>the key in the request (proof of possession)</td><td>the Moderator's registered key, over the stored row</td></tr>
+  <tr><td><b>Anti-replay</b></td><td colspan="2">single-use challenge, ≤ 120 s, bound to <code>https://RELIC_HOST</code>; consumed before verification</td><td>one decision per request; signature stored, re-checkable offline</td></tr>
+</table>
+<div class="note">The server never trusts the nonce, expiry or audience a client sends back: it rebuilds the bytes from its own challenge row.
+Changing any field means a new <code>v2</code> domain and new vectors, never editing <code>v1</code>.</div>
+
+<h2><span class="n">06</span>Endpoints that work today</h2>
+<table class="keep">
+  <tr><th style="width:44px">Method</th><th>Path</th><th style="width:92px">Who</th><th>Result</th></tr>
+  <tr><td>GET</td><td class="mono">/healthz</td><td>anyone</td><td>liveness, unversioned</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/auth/challenge</td><td>anyone</td><td>201 single-use challenge, <code>{"purpose": "login" | "registration"}</code></td></tr>
+  <tr><td>POST</td><td class="mono">/v1/auth/login</td><td>anyone</td><td>200 token · 401 · 403 (pending, rejected, revoked; key holder only)</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/accounts</td><td>anyone</td><td>202 pending request · 401 bad proof · 409 key already used</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/me</td><td>logged in</td><td>own User ID, role, owner type, public key</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/users[/{id}]</td><td>logged in</td><td>public identities; never name or email</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
+  <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature · 409 already decided</td></tr>
+</table>
+<p class="small muted">All other catalogue, submission, flag and revocation routes listed in <code>database/api/README.md</code> require login and return <code>501</code> until their signed formats are implemented.</p>
+
+<h2><span class="n">07</span>Security layers, outside in</h2>
+<p>Each layer holds even if the one before it fails: Caddy and the app both set headers; the app and the database both check roles.</p>
+<table class="layers">
+  <tr><td>Containers<span>compose, Dockerfile</span></td><td><span class="chip">read-only FS, tmpfs /tmp</span><span class="chip">cap_drop ALL</span><span class="chip">no-new-privileges</span><span class="chip">pids + memory limits</span><span class="chip">API on internal network only</span><span class="chip">non-root, no shell</span><span class="chip">concurrency + keep-alive limits</span></td></tr>
+  <tr><td>Edge<span>Caddyfile</span></td><td><span class="chip">TLS 1.2/1.3 + HSTS</span><span class="chip">1 MB body cap</span><span class="chip">CSP default-src 'none'</span><span class="chip">no-store</span><span class="chip">X-Forwarded-For replaced with real client</span></td></tr>
+  <tr><td>Startup checks<span>config.py</span></td><td><span class="chip">JWT secret ≥ 32 chars</span><span class="chip">bare host only</span><span class="chip">remote DB requires TLS</span><span class="chip">/docs only in dev mode</span></td></tr>
+  <tr><td>Transport<span>security.py</span></td><td><span class="chip">64 KB body limit, declared + streamed</span><span class="chip">security headers on every response</span><span class="chip">Server header stripped</span></td></tr>
+  <tr><td>Abuse limits<span>per client IP, in memory</span></td><td><span class="chip">challenge + login: 10/min</span><span class="chip">registration: 5/h</span><span class="chip">overall: 300/min</span><span class="chip">429 + Retry-After</span><span class="chip">bounded key table</span></td></tr>
+  <tr><td>Identity<span>deps.py</span></td><td><span class="chip">HS256 only (no alg:none)</span><span class="chip">iss, aud, exp, nbf, iat, jti required</span><span class="chip">token ≤ 2 KB</span><span class="chip">account re-read every request</span><span class="chip">403 wrong role</span></td></tr>
+  <tr><td>Input<span>schemas.py</span></td><td><span class="chip">unknown fields → 422</span><span class="chip">lowercase hex, exact lengths</span><span class="chip">signed text rejected, never trimmed</span><span class="chip">no control characters</span><span class="chip">bounded paging</span></td></tr>
+  <tr><td>Signatures<span>crypto.py</span></td><td><span class="chip">strict Ed25519 (libsodium)</span><span class="chip">small-order keys rejected</span><span class="chip">domain separation</span><span class="chip">verify before lookup</span><span class="chip">audit log, no secrets</span></td></tr>
+  <tr><td>Database<span>migration 008</span></td><td><span class="chip">5 s statement timeout</span><span class="chip">idle-in-transaction timeout</span><span class="chip">identities immutable, keys unique</span><span class="chip">challenge consumed once, DB clock</span><span class="chip">decisions final</span><span class="chip">evidence append-only for relic_app</span><span class="chip">accounts only via decide_registration()</span></td></tr>
+</table>
+
+<h3>Known gaps (as of 22 Nov 2026)</h3>
+<table class="keep">
+  <tr><th style="width:210px">Gap</th><th>Effect · direction</th></tr>
+  <tr><td>One Moderator can create Moderators alone</td><td>Including approving their own second key (verified). A stolen Moderator key can mint accounts and outvote honest Moderators. Fix: operator-only or two-Moderator approval for the Moderator role.</td></tr>
+  <tr><td>No key rotation or recovery</td><td>Key = identity. A lost key means a new account; history is not linked. A compromised key can only be revoked.</td></tr>
+  <tr><td>Tokens cannot be revoked individually</td><td>No logout; a stolen token works up to 8 h unless the whole account is revoked. Writes still need the key.</td></tr>
+  <tr><td>Rate limits are per IP, per process</td><td>IPv6 hosts own a /64; the table evicts old entries. Run one worker; limit IPv6 per /64 and cap open challenges.</td></tr>
+  <tr><td>Registration hygiene</td><td>Rejected keys may reapply indefinitely; pending requests never expire; emails are not verified; request rows (with PII) can never be deleted.</td></tr>
+</table>
+
+<h2><span class="n">08</span>Try it locally</h2>
+<pre># throwaway Postgres (port 55433) + schema + migrations, API from source on 127.0.0.1:8000
+scripts/local-dev.sh up
+scripts/local-dev.sh bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
+scripts/local-dev.sh api                               # foreground; RELIC_DEV_API_PORT to change
+scripts/local-dev.sh pending                           # list open requests
+scripts/local-dev.sh approve|reject REQUEST_ID ~/.ssh/mod   # logs in by key, signs, submits</pre>
+<pre># client side: register, then log in with the same key
+ssh-keygen -t ed25519 -a 100 -C relic -f ~/.ssh/relic_ed25519
+cargo build --release -p relic-ingest
+curl -s -X POST $API/v1/auth/challenge -H 'content-type: application/json' -d '{"purpose":"registration"}' &gt; ch.json
+relic-sign-challenge register --challenge ch.json --key ~/.ssh/relic_ed25519 --role analyst --name "Ada" --email ada@example.org &gt; reg.json
+curl -s -X POST $API/v1/accounts -H 'content-type: application/json' -d @reg.json            # 202 pending
+curl -s -X POST $API/v1/auth/challenge -H 'content-type: application/json' -d '{"purpose":"login"}' &gt; ch.json
+relic-sign-challenge login --challenge ch.json --key ~/.ssh/relic_ed25519 &gt; login.json
+curl -s -X POST $API/v1/auth/login -H 'content-type: application/json' -d @login.json        # 403 until approved, then token</pre>
+<p class="small muted">Tests: <code>cd database/api &amp;&amp; RELIC_TEST_SUPERUSER_URL=postgresql://postgres:postgres@127.0.0.1:55432 pytest</code> (90 pass) and <code>cargo test --workspace</code>.
+Full formats: <code>docs/authentication.md</code>. Endpoint catalogue: <code>database/api/README.md</code>.</p>
+
+</body>
+</html>
