@@ -97,6 +97,14 @@ class UserPublic(BaseModel):
 RegistrationStatus = Literal["pending", "approved", "rejected"]
 
 
+class Approval(BaseModel):
+    """A first Moderator approval, signed over the ordinary decision message."""
+
+    moderator_id: UUID
+    signature: str = Field(description="Moderator's approval signature, lowercase hex")
+    approved_at: datetime
+
+
 class RegistrationDetail(BaseModel):
     """A registration request as a Moderator reviews it (includes contact details)."""
 
@@ -112,12 +120,22 @@ class RegistrationDetail(BaseModel):
     decided_at: datetime | None
     decision_signature: str | None = Field(description="Moderator's signature, lowercase hex")
     user_id: UUID | None = Field(description="The created account, once approved")
+    approvals_required: int = Field(description="2 for a Moderator registration, else 1")
+    approvals: list[Approval] = Field(description="First approvals still awaiting a second Moderator")
 
 
 class RegistrationDecisionRequest(_Request):
     moderator_id: UUID
     decision: Literal["approved", "rejected"]
     signature: HexSignature
+
+
+class AwaitingSecondApproval(BaseModel):
+    """202: the approval is stored; another active Moderator must approve too."""
+
+    status: Literal["awaiting_second_approval"] = "awaiting_second_approval"
+    approvals: list[Approval]
+    approvals_required: int = 2
 
 
 class RegistrationDecisionResponse(BaseModel):
@@ -177,6 +195,8 @@ class RevocationDetail(BaseModel):
     moderator_id: UUID | None
     decided_at: datetime | None
     decision_signature: str | None = Field(description="Moderator's signature, lowercase hex")
+    approvals_required: int = Field(description="2 when the target is a Moderator account, else 1")
+    approvals: list[Approval] = Field(description="First approvals still awaiting a second Moderator")
 
 
 class RevocationDecisionRequest(_Request):

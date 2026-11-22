@@ -192,6 +192,34 @@ struct RegistrationFile {
     name: String,
     organisation: Option<String>,
     email: String,
+    #[serde(default)]
+    approvals_required: u8,
+    #[serde(default)]
+    approvals: Vec<ApprovalEntry>,
+}
+
+/// A first Moderator approval awaiting a second Moderator.
+#[derive(Debug, Deserialize)]
+struct ApprovalEntry {
+    moderator_id: Uuid,
+}
+
+/// Tell the Moderator when their approval is one of two.
+fn note_approvals(required: u8, approvals: &[ApprovalEntry]) {
+    if required > 1 {
+        let so_far: Vec<String> = approvals
+            .iter()
+            .map(|a| a.moderator_id.to_string())
+            .collect();
+        eprintln!(
+            "Needs {required} Moderators to approve; approved so far by: {}",
+            if so_far.is_empty() {
+                "nobody".to_owned()
+            } else {
+                so_far.join(", ")
+            }
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +231,10 @@ struct RevocationFile {
     target_id: Uuid,
     reason: String,
     request_signature: String,
+    #[serde(default)]
+    approvals_required: u8,
+    #[serde(default)]
+    approvals: Vec<ApprovalEntry>,
 }
 
 /// A public identity as returned by `GET /v1/users/{id}`.
@@ -386,6 +418,7 @@ fn decide_registration(
         file.requested_role,
         file.public_key,
     );
+    note_approvals(file.approvals_required, &file.approvals);
     let signer = load_key(key)?;
     let digest = auth::registration_decision_digest(
         file.registration_request_id.as_bytes(),
@@ -470,6 +503,7 @@ fn decide_revocation(
         },
     );
     eprintln!("Target: {} {}\n{target}", file.target_type, file.target_id);
+    note_approvals(file.approvals_required, &file.approvals);
     eprintln!(
         "Signing: {} revocation {} of {} {}: {}",
         verdict.as_str(),

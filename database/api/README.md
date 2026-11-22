@@ -38,6 +38,7 @@ permanent Ed25519 public key. Human accounts have exactly one role
 | `relic_owner` | Migrations and the database operator (NOLOGIN; reached with `SET ROLE`) | Everything. Owns the schema. Creates the first Moderator and system accounts, and is the only one allowed to revoke a system account. |
 | `relic_app` | This API (`RELIC_DATABASE_URL`) | User-signed rows: challenges, registration requests, revocations, flags and responses (and, for the coming submission routes, corpus objects). Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
 | `relic_worker` | `relic-ingest-fidbf`, `relic-chain-bsim`, `relic-checkpoint-mmr` | Appends only: FIDBF admissions (source, batch, binary, FIDBF, functions) and system-signed integrity entries and checkpoints. Reads catalogue data, never contact details, registration requests or login challenges. |
+| `relic_auditor` | `relic-verify` (e.g. from cron) | Nothing; read-only transactions by default. Reads everything it re-verifies (including registration requests and their challenges), never `user_private`. |
 
 The database checks who a system row names, not its signature, so only the
 workers, which hold the system keys, may append system-signed evidence.
@@ -71,8 +72,8 @@ key by signing a single-use server challenge; message formats are specified in
 | `GET` | `/v1/me` | Any | The caller's User ID, role, owner type and public key. |
 | `POST` | `/v1/accounts` | none | Submit a registration request: the applicant's own public key, account details and a signature over a registration challenge (proof of possession). Returns `202 Accepted`; the request stays pending until a moderator signs an approval. RELIC never generates or receives private keys. |
 | `GET` | `/v1/registrations` | Moderator | Registration requests, oldest first. `status` = `pending` (default), `approved` or `rejected`. Includes name, organisation and email, which no other route exposes. |
-| `GET` | `/v1/registrations/{id}` | Moderator | One request, in the exact shape `relic-sign-challenge decide-registration` signs. |
-| `POST` | `/v1/registrations/{id}/decision` | Moderator · Signed | Approve or reject a pending request: `{moderator_id, decision, signature}`. `moderator_id` must be the caller. The signature covers the stored request and the verdict. Approval creates the account and returns its `user_id`. Final: a second decision is `409`. |
+| `GET` | `/v1/registrations/{id}` | Moderator | One request, in the exact shape `relic-sign-challenge decide-registration` signs, with `approvals_required` and the first `approvals` so far. |
+| `POST` | `/v1/registrations/{id}/decision` | Moderator · Signed | Approve or reject a pending request: `{moderator_id, decision, signature}`. `moderator_id` must be the caller. The signature covers the stored request and the verdict. Approval creates the account and returns its `user_id`. **A Moderator registration needs two different Moderators:** the first approval is stored and answered `202 {status: "awaiting_second_approval", approvals}`; the same Moderator again is `409`; the second approval creates the account. One rejection is final. Final: a second decision is `409`. |
 
 Every authenticated request re-reads the account, so an approved revocation
 invalidates live tokens immediately. Challenges are consumed before the
@@ -172,9 +173,9 @@ key and shows the target before it signs.
 | Method | Path | Role | Description |
 |---|---|---|---|
 | `GET` | `/v1/revocations` | Any | Requests and decisions, oldest first. Filters: `status` (`pending`, `approved`, `rejected`), `target_type`, `target_id`. Both signatures are returned as hex for offline re-verification. |
-| `GET` | `/v1/revocations/{id}` | Any | One request, in the exact shape `decide-revocation` signs. |
+| `GET` | `/v1/revocations/{id}` | Any | One request, in the exact shape `decide-revocation` signs, with `approvals_required` and the first `approvals` so far. |
 | `POST` | `/v1/revocations` | Analyst · Signed | `{revocation_id, analyst_id, target_type, target_id, reason, signature}`: request revocation of a catalogue object, or of an account (`target_type = user`). `analyst_id` must be the caller; `revocation_id` is a fresh UUID chosen by the client. `201` created; `200` identical retry; `403` bad signature or a system account as target (operator only); `409` ID reused with other content, target already has an open request, or target already revoked; `422` unknown target. |
-| `POST` | `/v1/revocations/{id}/decision` | Moderator · Signed | `{moderator_id, decision, signature}`: approve or reject a pending request. `moderator_id` must be the caller; never for the Moderator's own account (`403`). Final: a second decision is `409`. Stays decidable if the requesting Analyst has since been revoked. An approved account revocation blocks that account's tokens and logins immediately. |
+| `POST` | `/v1/revocations/{id}/decision` | Moderator · Signed | `{moderator_id, decision, signature}`: approve or reject a pending request. `moderator_id` must be the caller; never for the Moderator's own account (`403`). Final: a second decision is `409`. Stays decidable if the requesting Analyst has since been revoked. **Revoking a Moderator account needs two different Moderators** (neither the target): the first approval is answered `202`, the second revokes; one rejection is final. An approved account revocation blocks that account's tokens and logins immediately. |
 
 Nothing is deleted. A revoked object or account remains visible, marked as
 revoked.

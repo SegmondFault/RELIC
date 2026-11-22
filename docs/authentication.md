@@ -101,7 +101,15 @@ in the same transaction. That function is the only way the application can
 create a human account; the database re-checks that the decider is an active
 Moderator and that the decision is final. There is no challenge: the request
 ID is unique and a decision can be recorded once, so a captured decision cannot
-be replayed. Every field is stored in the row, so anyone can re-verify the
+be replayed.
+
+**Moderator registrations need two Moderators.** Each signs this same
+decision message with their own `moderator_id`. The first approval is stored
+in `registration_approval` (`202 awaiting_second_approval`); the approval of a
+second, different active Moderator creates the account. One rejection is
+final. The database enforces this too, inside `decide_registration()`, so a
+single Moderator (or a compromised API) cannot add a Moderator. The first
+Moderators are created by the database operator. Every field is stored in the row, so anyone can re-verify the
 decision later without the API.
 
 ### Revocation request
@@ -141,7 +149,11 @@ caller, and the API verifies with that Moderator's registered key over the
 stored row in the same transaction as the update. The database re-checks that
 the decider is an active Moderator,
 forbids a Moderator deciding the revocation of their own account, sets
-`decided_at` from its own clock, and makes the decision final. Anyone logged in
+`decided_at` from its own clock, and makes the decision final. Revoking a
+Moderator account needs two different Moderators, neither of them the target:
+the first approval is stored in `revocation_approval` (`202`), the second
+revokes; one rejection is final. Only the database operator may decide such a
+revocation alone (e.g. with only two Moderators). Anyone logged in
 can read revocations and re-verify both signatures from the row.
 
 ### Flag

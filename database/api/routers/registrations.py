@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..crypto import REGISTRATION_DECISION_SIGNATURE_DOMAIN, registration_decision_record, verify
 from ..deps import ConnDep, Identity, require_roles
+from . import _approvals
 from ..schemas import (
+    AwaitingSecondApproval,
     RegistrationDecisionRequest,
     RegistrationDecisionResponse,
     RegistrationDetail,
@@ -32,8 +34,11 @@ _COLUMNS = """
     name, organisation, email, requested_at,
     moderator_id, decided_at,
     encode(decision_signature, 'hex') AS decision_signature,
-    user_id
-"""
+    user_id,
+    CASE WHEN requested_role = 'moderator' THEN 2 ELSE 1 END AS approvals_required,
+""" + _approvals.approvals_sql(
+    "registration", "catalogue.registration_request.registration_request_id"
+)
 
 
 @router.get("/registrations", response_model=list[RegistrationDetail])
@@ -70,6 +75,7 @@ async def get_registration(registration_request_id: UUID, conn: ConnDep):
 @router.post(
     "/registrations/{registration_request_id}/decision",
     response_model=RegistrationDecisionResponse,
+    responses={202: {"model": AwaitingSecondApproval}},
 )
 async def decide_registration(
     registration_request_id: UUID,
@@ -81,7 +87,9 @@ async def decide_registration(
 
     The signature is verified against the Moderator's registered key over the
     request row as stored, inside the same transaction that records the
-    decision (and, on approval, creates the account).
+    decision (and, on approval, creates the account). Approving a Moderator
+    needs two different Moderators: the first approval is stored and answered
+    with ``202``; the second creates the account. One rejection is final.
     """
     if body.moderator_id != moderator.user_id:
         raise HTTPException(
@@ -89,9 +97,10 @@ async def decide_registration(
         )
 
     async with conn.transaction():
-        # No row lock: relic_app has no UPDATE privilege here (so FOR UPDATE is
-        # refused), request fields are immutable, and decide_registration()
-        # locks the row and its trigger rejects a second decision.
+        # relic_app has no UPDATE privilege here (so FOR UPDATE is refused);
+        # an advisory lock serialises decisions on this request instead, and
+        # decide_registration() locks the row and rejects a second decision.
+        await _approvals.lock(conn, "registration", registration_request_id)
         cur = await conn.execute(
             """SELECT public_key, requested_role::text AS requested_role, name, organisation,
                       email, decision
@@ -128,6 +137,18 @@ async def decide_registration(
                 moderator.user_id,
             )
             raise HTTPException(status_code=403, detail="Decision signature rejected")
+
+        if body.decision == "approved" and request["requested_role"] == "moderator":
+            pending = await _approvals.first_approval(
+                conn, "registration", registration_request_id, moderator.user_id, signature
+            )
+            if pending is not None:
+                audit.info(
+                    "registration first approval id=%s moderator=%s",
+                    registration_request_id,
+                    moderator.user_id,
+                )
+                return pending
 
         # The database re-checks that the decider is an active Moderator and
         # that the decision is final.

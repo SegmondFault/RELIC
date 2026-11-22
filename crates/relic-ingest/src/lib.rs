@@ -358,22 +358,12 @@ fn insert_integrity_entry(
         .map(|row| row.get::<_, String>(0).parse::<Digest32>())
         .transpose()
         .map_err(|_| IngestError::MalformedChainTip)?;
-    let accepted_at_bytes = accepted_at_micros.to_be_bytes();
-    let record_bytes = encode_fields(
-        ADMISSION_RECORD_DOMAIN,
-        &[
-            &prepared.source_bytes,
-            &prepared.batch_bytes,
-            &prepared.fidbf_bytes,
-            &accepted_at_bytes,
-            manifest.analyst_user_id.as_bytes(),
-        ],
-    );
+    let record_hash = record_hash_of(prepared, manifest.analyst_user_id, accepted_at_micros);
     let signed_integrity = sign_entry(
         IntegrityEnvelope {
             source_id: manifest.source.source_id.to_string(),
             source_type: manifest.source.source_type.clone(),
-            record_hash: sha256(&record_bytes),
+            record_hash,
             prev_hash: previous_hash,
             format_version: 1,
             created_at_unix_micros: accepted_at_micros,
@@ -474,43 +464,98 @@ fn prepare_submission(
         source,
     })?;
     verify_reader(file, claimed_sha256, claimed_md5).map_err(IngestError::ObjectVerification)?;
+    Ok(canonical_parts(manifest))
+}
 
+fn canonical_parts(manifest: &FidbfIngestManifest) -> PreparedSubmission {
     let source_bytes = canonical_source(manifest);
     let batch_bytes = canonical_batch(manifest);
     let fidbf_bytes = canonical_fidbf(manifest);
     let batch_sha256 = sha256(&batch_bytes);
     let batch_md5 = CompatibilityMd5::from_bytes(Md5::digest(&batch_bytes).into());
 
-    Ok(PreparedSubmission {
+    PreparedSubmission {
         source_bytes,
         batch_bytes,
         fidbf_bytes,
         batch_sha256,
         batch_md5,
-    })
+    }
+}
+
+/// Verify the three analyst signatures of an admission rebuilt from stored rows.
+///
+/// Used by `relic-verify`; admission itself checks the same signatures over
+/// the same canonical bytes before inserting anything.
+///
+/// # Errors
+///
+/// Returns [`IngestError::InvalidAnalystSignature`] naming the first part
+/// (source, batch or FIDBF) whose signature does not verify.
+pub fn verify_manifest_signatures(
+    manifest: &FidbfIngestManifest,
+    public_key: &[u8; 32],
+    signatures: &AnalystSignatures,
+) -> Result<(), IngestError> {
+    verify_analyst_signatures(public_key, &canonical_parts(manifest), signatures)
+}
+
+/// The integrity-chain `record_hash` committed for an admission.
+#[must_use]
+pub fn admission_record_hash(manifest: &FidbfIngestManifest, accepted_at_micros: i64) -> Digest32 {
+    record_hash_of(&canonical_parts(manifest), manifest.analyst_user_id, accepted_at_micros)
+}
+
+fn record_hash_of(prepared: &PreparedSubmission, analyst: Uuid, accepted_at_micros: i64) -> Digest32 {
+    sha256(&encode_fields(
+        ADMISSION_RECORD_DOMAIN,
+        &[
+            &prepared.source_bytes,
+            &prepared.batch_bytes,
+            &prepared.fidbf_bytes,
+            &accepted_at_micros.to_be_bytes(),
+            analyst.as_bytes(),
+        ],
+    ))
 }
 
 fn canonical_source(manifest: &FidbfIngestManifest) -> Vec<u8> {
-    let ecological = manifest.source.is_ecological.map_or(2, u8::from);
-    let reference = encode_optional(manifest.source.reference.as_deref());
-    let snapshot = encode_optional(manifest.source.snapshot_version.as_deref());
+    canonical_source_of(&manifest.source, manifest.analyst_user_id)
+}
+
+fn canonical_source_of(source: &SourceInput, analyst_user_id: Uuid) -> Vec<u8> {
+    let ecological = source.is_ecological.map_or(2, u8::from);
+    let reference = encode_optional(source.reference.as_deref());
+    let snapshot = encode_optional(source.snapshot_version.as_deref());
     encode_fields(
         SOURCE_RECORD_DOMAIN,
         &[
-            manifest.source.source_id.as_bytes(),
-            manifest.source.name.as_bytes(),
-            manifest.source.source_type.as_bytes(),
+            source.source_id.as_bytes(),
+            source.name.as_bytes(),
+            source.source_type.as_bytes(),
             &reference,
             &snapshot,
-            &manifest
-                .source
-                .retrieved_at
-                .timestamp_micros()
-                .to_be_bytes(),
+            &source.retrieved_at.timestamp_micros().to_be_bytes(),
             &[ecological],
-            manifest.analyst_user_id.as_bytes(),
+            analyst_user_id.as_bytes(),
         ],
     )
+}
+
+/// Verify one source's analyst signature, whether or not it has a FIDBF.
+///
+/// # Errors
+///
+/// Returns [`IngestError::InvalidAnalystSignature`] if it does not verify.
+pub fn verify_source_signature(
+    source: &SourceInput,
+    analyst_user_id: Uuid,
+    public_key: &[u8; 32],
+    signature: &SignatureHex,
+) -> Result<(), IngestError> {
+    let digest = sha256(&canonical_source_of(source, analyst_user_id));
+    verify_digest_signature(public_key, SOURCE_SIGNATURE_DOMAIN, &digest, signature.as_bytes())
+        .map_err(|_| IngestError::InvalidAnalystSignature("source"))
 }
 
 fn canonical_batch(manifest: &FidbfIngestManifest) -> Vec<u8> {

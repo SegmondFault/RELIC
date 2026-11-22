@@ -23,7 +23,9 @@ from ..crypto import (
     verify,
 )
 from ..deps import ConnDep, Identity, current_identity, registered_key, require_roles
+from . import _approvals
 from ..schemas import (
+    AwaitingSecondApproval,
     RevocationDecisionRequest,
     RevocationDecisionResponse,
     RevocationDetail,
@@ -47,8 +49,10 @@ _COLUMNS = """
     target_id, reason, requested_at,
     encode(request_signature, 'hex') AS request_signature,
     moderator_id, decided_at,
-    encode(decision_signature, 'hex') AS decision_signature
-"""
+    encode(decision_signature, 'hex') AS decision_signature,
+    CASE WHEN catalogue.target_is_moderator(target_type, target_id) THEN 2 ELSE 1 END
+        AS approvals_required,
+""" + _approvals.approvals_sql("revocation", "catalogue.revocation.revocation_id")
 
 _INSERT = f"""
     INSERT INTO catalogue.revocation
@@ -190,6 +194,7 @@ async def request_revocation(
 @router.post(
     "/revocations/{revocation_id}/decision",
     response_model=RevocationDecisionResponse,
+    responses={202: {"model": AwaitingSecondApproval}},
 )
 async def decide_revocation(
     revocation_id: UUID,
@@ -201,6 +206,9 @@ async def decide_revocation(
 
     The signature is verified against the Moderator's registered key over the
     request as stored, in the same transaction that records the decision.
+    Approving the revocation of a Moderator account needs two different
+    Moderators (neither the target): the first approval is stored and
+    answered with ``202``; the second revokes. One rejection is final.
     """
     if body.moderator_id != moderator.user_id:
         raise HTTPException(
@@ -208,9 +216,11 @@ async def decide_revocation(
         )
 
     async with conn.transaction():
+        await _approvals.lock(conn, "revocation", revocation_id)
         cur = await conn.execute(
             """SELECT analyst_request_id, target_type::text AS target_type, target_id, reason,
-                      decision
+                      decision,
+                      catalogue.target_is_moderator(target_type, target_id) AS target_is_moderator
                  FROM catalogue.revocation
                 WHERE revocation_id = %s""",
             (revocation_id,),
@@ -245,6 +255,21 @@ async def decide_revocation(
                 moderator.user_id,
             )
             raise HTTPException(status_code=403, detail="Decision signature rejected")
+
+        if body.decision == "approved" and stored["target_is_moderator"]:
+            pending = await _approvals.first_approval(
+                conn,
+                "revocation",
+                revocation_id,
+                moderator.user_id,
+                signature,
+                exclude=stored["target_id"],
+            )
+            if pending is not None:
+                audit.info(
+                    "revocation first approval id=%s moderator=%s", revocation_id, moderator.user_id
+                )
+                return pending
 
         # The row triggers re-check the Moderator and the requester, forbid
         # self-decision and set decided_at from the database clock. The WHERE

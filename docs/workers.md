@@ -30,7 +30,8 @@ submission has verified.
 
 ## Database login
 
-The workers connect as `relic_worker`, never as the API's `relic_app`:
+The workers connect as `relic_worker`, never as the API's `relic_app`
+(`relic-verify` uses its own read-only `relic_auditor`):
 
 ```sql
 ALTER ROLE relic_worker LOGIN PASSWORD '...';   -- migration 008 creates it NOLOGIN
@@ -43,6 +44,45 @@ requests or login challenges. `relic_app` cannot append integrity entries or
 checkpoints, so a compromised API cannot add forged system-signed rows to the
 chain. PostgreSQL requires every stored signature to be 64 bytes but does not
 verify signatures; the system keys stay with the workers.
+
+## Verifier (`relic-verify`)
+
+PostgreSQL checks roles, lengths and who a row names, but not signatures.
+`relic-verify` re-checks everything from the stored rows alone, in one
+read-only snapshot, as `relic_auditor`:
+
+- registration proofs (applicant key over the challenge), registration
+  decisions and first approvals, and that each approved account matches its
+  request; a Moderator approved without a second Moderator is a failure;
+- revocation requests, decisions and first approvals;
+- flags and flag responses;
+- every source signature, and every FIDBF admission rebuilt from its source,
+  batch, binary, function and FIDBF rows (all three analyst signatures);
+- the integrity chain: one linear chain from one genesis, every chain hash and
+  system signature, and that every entry commits to a stored FIDBF admission or
+  BSim object;
+- every MMR checkpoint against the MMR rebuilt from the chain, and its
+  system signature.
+
+Rows without a canonical signed format yet (BSim, provenance, licence
+assertions, classifications, compositions, component assertions) and accounts
+created by the operator are counted as not checkable. Exit status: `0`
+verified, `1` at least one failure, `2` could not run. `--json` for machines,
+`--quiet` prints only failures and warnings.
+
+```cron
+# /etc/cron.d/relic-verify: hourly; cron mails any output, --quiet prints only problems.
+# /etc/relic/verify.env (mode 0600, owner relic-verify) holds
+#   export RELIC_DATABASE_URL=postgresql://relic_auditor:PASSWORD@127.0.0.1:5432/relic
+15 * * * *  relic-verify  . /etc/relic/verify.env && relic-verify --quiet
+```
+
+Run it on the database host (or another trusted host), not on the API host,
+so a compromised API host cannot silence it. Like the other Rust tools it does
+not speak TLS to PostgreSQL yet: connect over loopback or a Unix-socket
+tunnel, never across a network in the clear. It detects; it does not repair: rows are append-only, and the
+response to a failure is to revoke the forged row or account and investigate.
+Locally: `scripts/local-dev.sh verify`.
 
 ## Object worker
 

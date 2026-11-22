@@ -13,7 +13,10 @@ import pytest
 from psycopg import errors
 
 APPEND_ONLY_EVIDENCE = {"integrity", "mmr_checkpoint"}
-NOT_CATALOGUE_DATA = {"user_private", "registration_request", "auth_challenge"}
+NOT_CATALOGUE_DATA = {
+    "user_private", "registration_request", "auth_challenge",
+    "registration_approval", "revocation_approval",
+}
 WORKER_INSERTS = {
     "source", "batch", "binary_record", "fidbf", "function_record", "integrity", "mmr_checkpoint",
 }
@@ -60,8 +63,17 @@ def test_worker_login_privileges(database):
     assert _granted(database, "relic_worker", "DELETE") == set()
 
 
-def test_neither_login_is_an_operator(database):
-    for role in ("relic_app", "relic_worker"):
+def test_auditor_login_only_reads(database):
+    tables = _tables(database)
+    assert _granted(database, "relic_auditor", "SELECT") == tables - {"user_private"}
+    for privilege in ("INSERT", "UPDATE", "DELETE"):
+        assert _granted(database, "relic_auditor", privilege) == set(), privilege
+    with psycopg.connect(database.auditor_url) as conn:
+        assert conn.execute("SHOW default_transaction_read_only").fetchone()[0] == "on"
+
+
+def test_no_login_is_an_operator(database):
+    for role in ("relic_app", "relic_worker", "relic_auditor"):
         member, superuser, createrole, bypassrls = database.execute(
             "SELECT pg_has_role(%s, 'relic_owner', 'USAGE'), rolsuper, rolcreaterole, rolbypassrls"
             " FROM pg_roles WHERE rolname = %s",

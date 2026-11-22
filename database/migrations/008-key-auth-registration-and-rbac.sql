@@ -29,6 +29,8 @@
 --   checkpoints) must be a 64-byte Ed25519 signature.
 -- * Workers get their own login, relic_worker; the API's relic_app can no
 --   longer append to the integrity chain or MMR checkpoints.
+-- * Approving a Moderator registration, and approving the revocation of a
+--   Moderator account, need two different active Moderators.
 -- * Foreign-key indexes used by filtered catalogue lists also cover the
 --   primary key, so each cursor page is a single index range scan.
 
@@ -50,6 +52,18 @@ END
 $$;
 GRANT CONNECT ON DATABASE relic TO relic_worker;
 ALTER ROLE relic_worker IN DATABASE relic SET search_path = catalogue, public;
+
+-- relic-verify re-checks every stored signature and the chain; it only reads.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_auditor') THEN
+        CREATE ROLE relic_auditor NOLOGIN;
+    END IF;
+END
+$$;
+GRANT CONNECT ON DATABASE relic TO relic_auditor;
+ALTER ROLE relic_auditor IN DATABASE relic SET search_path = catalogue, public;
+ALTER ROLE relic_auditor IN DATABASE relic SET default_transaction_read_only = on;
 
 SET ROLE relic_owner;
 SET search_path = catalogue, public;
@@ -528,6 +542,194 @@ BEFORE INSERT OR UPDATE OR DELETE ON revocation
 FOR EACH ROW EXECUTE FUNCTION guard_revocation();
 
 -- ---------------------------------------------------------------------------
+-- Two-Moderator approval for Moderator powers
+-- ---------------------------------------------------------------------------
+
+-- One Moderator alone could otherwise approve a new Moderator (including a
+-- second key of their own) and, with any Analyst account, revoke the other
+-- Moderators. Approving a Moderator registration and approving the
+-- revocation of a Moderator account therefore need two different, active
+-- Moderators: the first approval is stored here with its signature, the
+-- second is the final decision on the request row. Each Moderator signs the
+-- ordinary decision message (it names the Moderator and the verdict), so the
+-- approvals are re-verifiable like any decision. A single rejection is final.
+
+CREATE FUNCTION is_active_moderator(candidate_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM user_public
+         WHERE user_id = candidate_id
+           AND owner_type = 'human'
+           AND role = 'moderator'
+    ) AND NOT account_is_revoked(candidate_id);
+$$;
+
+CREATE TABLE registration_approval (
+    registration_request_id uuid NOT NULL
+        REFERENCES registration_request(registration_request_id) ON DELETE RESTRICT,
+    moderator_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    approval_signature bytea NOT NULL CHECK (octet_length(approval_signature) = 64),
+    approved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (registration_request_id, moderator_id)
+);
+
+COMMENT ON TABLE registration_approval IS
+    'First Moderator approval of a Moderator registration; the second Moderator decides the request.';
+
+CREATE TABLE revocation_approval (
+    revocation_id uuid NOT NULL
+        REFERENCES revocation(revocation_id) ON DELETE RESTRICT,
+    moderator_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    approval_signature bytea NOT NULL CHECK (octet_length(approval_signature) = 64),
+    approved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (revocation_id, moderator_id)
+);
+
+COMMENT ON TABLE revocation_approval IS
+    'First Moderator approval of revoking a Moderator account; a second Moderator decides the request.';
+
+CREATE FUNCTION target_is_moderator(candidate_type corpus_target_type, candidate_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT candidate_type = 'user' AND EXISTS (
+        SELECT 1 FROM user_public WHERE user_id = candidate_id AND role = 'moderator'
+    );
+$$;
+
+CREATE FUNCTION guard_registration_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Approvals are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT is_active_moderator(NEW.moderator_id) THEN
+        RAISE EXCEPTION 'An approval requires an active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM registration_request
+         WHERE registration_request_id = NEW.registration_request_id
+           AND decision IS NULL
+           AND requested_role = 'moderator'
+    ) THEN
+        RAISE EXCEPTION 'Only a pending Moderator registration takes a first approval'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    NEW.approved_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER registration_approval_rules
+BEFORE INSERT OR UPDATE OR DELETE ON registration_approval
+FOR EACH ROW EXECUTE FUNCTION guard_registration_approval();
+
+CREATE FUNCTION guard_revocation_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Approvals are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT is_active_moderator(NEW.moderator_id) THEN
+        RAISE EXCEPTION 'An approval requires an active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM revocation
+         WHERE revocation_id = NEW.revocation_id
+           AND decision IS NULL
+           AND target_is_moderator(target_type, target_id)
+           AND target_id <> NEW.moderator_id
+    ) THEN
+        RAISE EXCEPTION 'Only a pending revocation of another Moderator takes a first approval'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    NEW.approved_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER revocation_approval_rules
+BEFORE INSERT OR UPDATE OR DELETE ON revocation_approval
+FOR EACH ROW EXECUTE FUNCTION guard_revocation_approval();
+
+-- Also applies through decide_registration(), which runs as relic_owner:
+-- there is no operator exception for registrations (the operator creates
+-- Moderators directly, see local-dev.sh bootstrap-moderator).
+CREATE FUNCTION require_second_registration_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF OLD.decision IS NULL
+       AND NEW.decision = 'approved'
+       AND NEW.requested_role = 'moderator'
+       AND NOT EXISTS (
+           SELECT 1 FROM registration_approval
+            WHERE registration_request_id = NEW.registration_request_id
+              AND moderator_id <> NEW.moderator_id
+              AND is_active_moderator(moderator_id)
+       ) THEN
+        RAISE EXCEPTION 'Approving a Moderator needs a prior approval by another active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER registration_moderator_needs_two
+BEFORE UPDATE ON registration_request
+FOR EACH ROW EXECUTE FUNCTION require_second_registration_approval();
+
+-- The database operator may still decide alone (e.g. with only two
+-- Moderators, one of them the target), as for system accounts.
+CREATE FUNCTION require_second_revocation_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF OLD.decision IS NULL
+       AND NEW.decision = 'approved'
+       AND target_is_moderator(NEW.target_type, NEW.target_id)
+       AND NOT is_database_operator()
+       AND NOT EXISTS (
+           SELECT 1 FROM revocation_approval
+            WHERE revocation_id = NEW.revocation_id
+              AND moderator_id <> NEW.moderator_id
+              AND moderator_id <> NEW.target_id
+              AND is_active_moderator(moderator_id)
+       ) THEN
+        RAISE EXCEPTION 'Revoking a Moderator needs a prior approval by another active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER revocation_moderator_needs_two
+BEFORE UPDATE ON revocation
+FOR EACH ROW EXECUTE FUNCTION require_second_revocation_approval();
+
+-- ---------------------------------------------------------------------------
 -- Flags and flag responses
 -- ---------------------------------------------------------------------------
 
@@ -816,6 +1018,8 @@ REVOKE SELECT, INSERT, UPDATE ON user_private FROM relic_app;
 
 GRANT SELECT, INSERT, UPDATE ON auth_challenge TO relic_app;
 GRANT SELECT, INSERT ON registration_request TO relic_app;
+GRANT SELECT, INSERT ON registration_approval, revocation_approval TO relic_app;
+REVOKE UPDATE, DELETE ON registration_approval, revocation_approval FROM relic_app;
 REVOKE UPDATE, DELETE ON registration_request FROM relic_app;
 
 REVOKE EXECUTE ON FUNCTION decide_registration(uuid, uuid, registration_decision, bytea) FROM PUBLIC;
@@ -836,6 +1040,8 @@ GRANT EXECUTE ON FUNCTION purge_expired_auth_challenges() TO relic_app;
 --               login that appends to the integrity chain and MMR
 --               checkpoints, which carry system signatures made with keys
 --               the API never holds.
+-- relic_auditor relic-verify (e.g. from cron). Reads everything it
+--               re-verifies, writes nothing, and never sees user_private.
 --
 -- The database checks who a system row names, not its signature, so a
 -- compromised API could otherwise append forged entries in a system
@@ -862,6 +1068,12 @@ TO relic_worker;
 GRANT INSERT ON
     source, batch, binary_record, fidbf, function_record, integrity, mmr_checkpoint
 TO relic_worker;
+
+-- Registration proofs are signed over their challenge and decisions over the
+-- request's contact details, so the auditor reads those tables too.
+GRANT USAGE ON SCHEMA catalogue TO relic_auditor;
+GRANT SELECT ON ALL TABLES IN SCHEMA catalogue TO relic_auditor;
+REVOKE SELECT ON user_private FROM relic_auditor;
 
 RESET ROLE;
 

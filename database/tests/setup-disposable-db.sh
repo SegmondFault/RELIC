@@ -6,8 +6,9 @@
 #   e.g. setup-disposable-db.sh postgresql://postgres:postgres@127.0.0.1:55432
 #
 # Never point this at a real server: it drops and recreates the `relic`
-# database and resets the relic_app and relic_worker passwords to
-# RELIC_TEST_APP_PASSWORD and RELIC_TEST_WORKER_PASSWORD.
+# database and resets the relic_app, relic_worker and relic_auditor passwords
+# to RELIC_TEST_APP_PASSWORD, RELIC_TEST_WORKER_PASSWORD and
+# RELIC_TEST_AUDITOR_PASSWORD.
 
 set -euo pipefail
 
@@ -19,6 +20,7 @@ fi
 superuser_uri="$1"
 app_password="${RELIC_TEST_APP_PASSWORD:-relic-test-only}"
 worker_password="${RELIC_TEST_WORKER_PASSWORD:-relic-test-only}"
+auditor_password="${RELIC_TEST_AUDITOR_PASSWORD:-relic-test-only}"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 psql_super() {
@@ -38,10 +40,14 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_worker') THEN
         CREATE ROLE relic_worker LOGIN;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_auditor') THEN
+        CREATE ROLE relic_auditor LOGIN;
+    END IF;
 END
 \$\$;
 ALTER ROLE relic_app PASSWORD '$app_password';
 ALTER ROLE relic_worker LOGIN PASSWORD '$worker_password';
+ALTER ROLE relic_auditor LOGIN PASSWORD '$auditor_password';
 CREATE DATABASE relic OWNER relic_owner;
 SQL
 

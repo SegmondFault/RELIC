@@ -18,6 +18,8 @@
 #                                                   log in as the Viewer, sign and submit a flag
 #   scripts/local-dev.sh respond-flag <flag_id> <analyst_key> <note>
 #                                                   sign and submit an Analyst's response
+#   scripts/local-dev.sh verify                     re-verify every signature and the chain
+#                                                   (relic-verify as relic_auditor)
 #   scripts/local-dev.sh api                        run the API on http://127.0.0.1:8000 (foreground)
 #   scripts/local-dev.sh psql                       open psql on the dev database as superuser
 #   scripts/local-dev.sh down                       remove the Postgres container and its data
@@ -63,7 +65,8 @@ cmd_up() {
         fi
         sleep 0.5
     done
-    RELIC_TEST_APP_PASSWORD="$app_password" \
+    RELIC_TEST_APP_PASSWORD="$app_password" RELIC_TEST_WORKER_PASSWORD="$app_password" \
+        RELIC_TEST_AUDITOR_PASSWORD="$app_password" \
         "$repo_dir/database/tests/setup-disposable-db.sh" "$super_uri"
     echo "PostgreSQL: $super_uri/relic (container $container)"
 }
@@ -227,6 +230,13 @@ cmd_respond_flag() {
     echo
 }
 
+cmd_verify() {
+    local verifier="$repo_dir/target/debug/relic-verify"
+    [[ -x "$verifier" ]] || cargo build -q -p relic-verify
+    "$verifier" --database-url \
+        "postgresql://relic_auditor:${app_password}@127.0.0.1:${pg_port}/relic" "$@"
+}
+
 cmd_api() {
     if [[ ! -x "$venv/bin/uvicorn" ]]; then
         python3 -m venv "$venv"
@@ -262,8 +272,9 @@ case "${1:-}" in
     reject-revocation) shift; cmd_decide revocation rejected "$@" ;;
     flag) shift; cmd_flag "$@" ;;
     respond-flag) shift; cmd_respond_flag "$@" ;;
+    verify) shift; cmd_verify "$@" ;;
     api) cmd_api ;;
     psql) shift; psql --no-psqlrc "$super_uri/relic" "$@" ;;
     down) cmd_down ;;
-    *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

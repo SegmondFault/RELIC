@@ -1339,6 +1339,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "relic-verify"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "postgres",
+ "relic-crypto",
+ "relic-domain",
+ "relic-ingest",
+ "relic-integrity-worker",
+ "relic-mmr-worker",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -18,6 +18,7 @@ DECLARE
     viewer_id uuid := gen_random_uuid();
     moderator_a uuid := gen_random_uuid();
     moderator_b uuid := gen_random_uuid();
+    moderator_c uuid := gen_random_uuid();
     analyst_b uuid := gen_random_uuid();
     system_id uuid := gen_random_uuid();
     source_id_value uuid := gen_random_uuid();
@@ -27,6 +28,7 @@ BEGIN
         (viewer_id, decode(repeat('a2', 32), 'hex'), 'viewer', 'human'),
         (moderator_a, decode(repeat('a3', 32), 'hex'), 'moderator', 'human'),
         (moderator_b, decode(repeat('a4', 32), 'hex'), 'moderator', 'human'),
+        (moderator_c, decode(repeat('a7', 32), 'hex'), 'moderator', 'human'),
         (analyst_b, decode(repeat('a5', 32), 'hex'), 'analyst', 'human'),
         (system_id, decode(repeat('a6', 32), 'hex'), NULL, 'system');
 
@@ -38,7 +40,7 @@ BEGIN
 
     INSERT INTO pg_temp.t VALUES
         ('analyst', analyst_id), ('viewer', viewer_id),
-        ('moderator_a', moderator_a), ('moderator_b', moderator_b),
+        ('moderator_a', moderator_a), ('moderator_b', moderator_b), ('moderator_c', moderator_c),
         ('analyst_b', analyst_b), ('system', system_id),
         ('source', source_id_value);
 END
@@ -251,6 +253,7 @@ DECLARE
     rev_id uuid;
     moderator_a uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_a');
     moderator_b uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_b');
+    moderator_c uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_c');
     analyst uuid := (SELECT id FROM pg_temp.t WHERE name = 'analyst');
 BEGIN
     rejected := false;
@@ -287,6 +290,34 @@ BEGIN
     IF NOT rejected THEN
         RAISE EXCEPTION 'moderator decided their own revocation';
     END IF;
+
+    -- The target is a Moderator: one Moderator alone cannot approve.
+    rejected := false;
+    BEGIN
+        UPDATE revocation
+           SET moderator_id = moderator_b, decision = 'approved',
+               decision_signature = decode(repeat('02', 64), 'hex')
+         WHERE revocation_id = rev_id;
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'one Moderator revoked a Moderator';
+    END IF;
+
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation_approval (revocation_id, moderator_id, approval_signature)
+        VALUES (rev_id, moderator_a, decode(repeat('04', 64), 'hex'));
+    EXCEPTION WHEN check_violation THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'the target Moderator approved their own revocation';
+    END IF;
+
+    INSERT INTO revocation_approval (revocation_id, moderator_id, approval_signature)
+    VALUES (rev_id, moderator_c, decode(repeat('04', 64), 'hex'));
 
     UPDATE revocation
        SET moderator_id = moderator_b, decision = 'approved',

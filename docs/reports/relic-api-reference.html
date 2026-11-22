@@ -140,8 +140,8 @@ account stays visible, marked revoked.</p>
   <tr><td>Submit sources, batches, FIDBF, BSim, provenance, licences, classifications</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
   <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Review and decide registrations</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Decide revocations (never their own; system accounts: operator only)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Review and decide registrations (a new Moderator needs two)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Decide revocations (never their own; a Moderator needs two; system accounts: operator only)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Sign integrity-chain entries and MMR checkpoints (workers)</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="muted small">outside API</td></tr>
 </table>
 <p class="small muted"><b>Roles are exclusive, not ranked:</b> a Moderator cannot submit corpus data and an Analyst cannot flag.
@@ -360,10 +360,10 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>GET</td><td class="mono">/v1/users[/{id}]</td><td>logged in</td><td>public identities; never name or email</td></tr>
   <tr><td>GET</td><td class="mono">/v1/&lt;resource&gt;<br>/v1/&lt;resource&gt;/{id}</td><td>logged in</td><td>Catalogue reads. <i>resource</i>: sources, batches, binaries, functions, fidbf, bsim, function-bsim, provenance, license-assertions, classifications, flags, flag-responses, integrity, mmr-checkpoints (also <code>/latest</code>). Lists page with <code>?after=&lt;last id&gt;</code>; signatures hex; 64-bit numbers as strings; <code>revoked</code> per object; no storage paths; large JSON only on <code>/{id}</code></td></tr>
   <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
-  <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature · 409 already decided</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 202 first of two (Moderator role) · 403 bad signature · 409 already decided or approved by you</td></tr>
   <tr><td>GET</td><td class="mono">/v1/revocations[/{id}]</td><td>logged in</td><td>requests and decisions with both signatures; filter <code>status</code>, <code>target_type</code>, <code>target_id</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 pending · 200 identical retry · 403 bad signature or system account (operator only) · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
-  <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 403 bad signature or own account · 409 already decided; account revocation is immediate</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 approve/reject · 202 first of two (target is a Moderator) · 403 bad signature or own account · 409 already decided; account revocation is immediate</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags</td><td>Viewer · signed</td><td>201 · 200 identical retry · 403 bad signature · 409 already flagged by you, target revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags/{id}/responses</td><td>Analyst · signed</td><td>201 · 200 identical retry · 403 bad signature · 404 unknown flag · 409 flag revoked or ID reused</td></tr>
 </table>
@@ -379,14 +379,14 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>Abuse limits<span>per client IP, in memory</span></td><td><span class="chip">challenge + login: 10/min</span><span class="chip">registration: 5/h</span><span class="chip">overall: 300/min</span><span class="chip">429 + Retry-After</span><span class="chip">bounded key table</span></td></tr>
   <tr><td>Identity<span>deps.py</span></td><td><span class="chip">HS256 only (no alg:none)</span><span class="chip">iss, aud, exp, nbf, iat, jti required</span><span class="chip">token ≤ 2 KB</span><span class="chip">account re-read every request</span><span class="chip">403 wrong role</span></td></tr>
   <tr><td>Input<span>schemas.py</span></td><td><span class="chip">unknown fields → 422</span><span class="chip">lowercase hex, exact lengths</span><span class="chip">signed text rejected, never trimmed</span><span class="chip">no control characters</span><span class="chip">bounded paging</span></td></tr>
-  <tr><td>Signatures<span>crypto.py</span></td><td><span class="chip">strict Ed25519 (libsodium)</span><span class="chip">small-order keys rejected</span><span class="chip">domain separation</span><span class="chip">verify before lookup</span><span class="chip">audit log, no secrets</span></td></tr>
+  <tr><td>Signatures<span>crypto.py</span></td><td><span class="chip">strict Ed25519 (libsodium)</span><span class="chip">small-order keys rejected</span><span class="chip">domain separation</span><span class="chip">verify before lookup</span><span class="chip">audit log, no secrets</span><span class="chip">relic-verify re-checks every stored signature</span></td></tr>
   <tr><td>Database<span>migration 008</span></td><td><span class="chip">5 s statement timeout</span><span class="chip">idle-in-transaction timeout</span><span class="chip">identities immutable, keys unique</span><span class="chip">challenge consumed once, DB clock</span><span class="chip">decisions final</span><span class="chip">evidence append-only, 64-byte signatures</span><span class="chip">chain: relic_worker only</span><span class="chip">accounts only via decide_registration()</span></td></tr>
 </table>
 
 <h3>Known gaps (as of 22 Nov 2026)</h3>
 <table class="keep">
   <tr><th style="width:210px">Gap</th><th>Effect · direction</th></tr>
-  <tr><td>One Moderator acts alone</td><td>Can approve a Moderator (even their own second key) and decide other Moderators' revocations. Deferred; fix: two-Moderator approval.</td></tr>
+  <tr><td>Signatures checked later</td><td>The database does not verify signatures: a compromised API can still store forged user-signed rows. relic-verify detects them on its next run.</td></tr>
   <tr><td>No key rotation</td><td>Key = identity: a lost key means a new, unlinked account; a compromised key can only be revoked.</td></tr>
   <tr><td>No per-token revocation</td><td>No logout; a stolen token works up to 8 h unless the account is revoked.</td></tr>
   <tr><td>Per-IP, per-process limits</td><td>IPv6 hosts own a /64. Run one worker; limit per /64; cap open challenges.</td></tr>
@@ -400,7 +400,7 @@ $dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
 $dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
 $dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
 $dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
-<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 214 pytest + <code>cargo test</code>.</p>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 230 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

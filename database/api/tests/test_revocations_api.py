@@ -424,10 +424,11 @@ def test_moderator_cannot_decide_own_revocation(client, database, analyst, analy
         assert response.status_code == 403
     assert _state(database, stored["revocation_id"]) == (None, None)
 
-    # Another Moderator can.
-    other = database.create_user("moderator")
-    response = _decide(client, bearer(login(client, other)), stored, decision_body(stored, other))
-    assert response.status_code == 200
+    # Two other Moderators can: the target is a Moderator account.
+    for expected in (202, 200):
+        other = database.create_user("moderator")
+        response = _decide(client, bearer(login(client, other)), stored, decision_body(stored, other))
+        assert response.status_code == expected, response.text
 
 
 def test_decision_is_final(client, database, pending, moderator, moderator_headers):

@@ -365,11 +365,20 @@ def _ssh_account(database, tmp_path: Path, name: str, role: str | None, owner: s
     return user_id, key_path
 
 
-@pytest.mark.skipif(
-    not (SIGN_FIDBF.exists() and INGEST_FIDBF.exists()),
-    reason="build with: cargo build -p relic-ingest",
-)
-def test_rust_admitted_fidbf_reads_back_exactly(client, database, corpus, headers, tmp_path: Path):
+RUST_ADMISSION = SIGN_FIDBF.exists() and INGEST_FIDBF.exists()
+
+
+@dataclass
+class Admission:
+    ids: dict[str, uuid.UUID]
+    manifest: dict
+    signatures: dict
+    analyst_id: uuid.UUID
+    system_id: uuid.UUID
+
+
+def admit_fidbf(database, tmp_path: Path) -> Admission:
+    """Sign a FIDBF admission with relic-sign-fidbf and admit it with relic-ingest-fidbf."""
     analyst_id, analyst_key = _ssh_account(database, tmp_path, "analyst", "analyst", "human")
     system_id, system_key = _ssh_account(database, tmp_path, "integrity", None, "system")
 
@@ -418,6 +427,15 @@ def test_rust_admitted_fidbf_reads_back_exactly(client, database, corpus, header
          "--integrity-key", str(system_key)],
         check=True, capture_output=True, text=True,
     )
+
+    return Admission(ids, manifest, signatures, analyst_id, system_id)
+
+
+@pytest.mark.skipif(not RUST_ADMISSION, reason="build with: cargo build -p relic-ingest")
+def test_rust_admitted_fidbf_reads_back_exactly(client, database, corpus, headers, tmp_path: Path):
+    admission = admit_fidbf(database, tmp_path)
+    ids, manifest, signatures = admission.ids, admission.manifest, admission.signatures
+    system_id = admission.system_id
 
     get = lambda path: client.get(path, headers=headers)  # noqa: E731
     assert get(f"/v1/sources/{ids['source']}").json()["signature"] == signatures["source"]
