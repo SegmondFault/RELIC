@@ -28,6 +28,22 @@ The integrity-system private key is different: it belongs to the narrowly
 scoped server worker and signs the RELIC integrity envelope after the analyst
 submission has verified.
 
+## Database login
+
+The workers connect as `relic_worker`, never as the API's `relic_app`:
+
+```sql
+ALTER ROLE relic_worker LOGIN PASSWORD '...';   -- migration 008 creates it NOLOGIN
+```
+
+`relic_worker` may append FIDBF admissions (source, batch, binary, FIDBF,
+functions), integrity entries and MMR checkpoints, and read catalogue data;
+it cannot update or delete anything, or read contact details, registration
+requests or login challenges. `relic_app` cannot append integrity entries or
+checkpoints, so a compromised API cannot add forged system-signed rows to the
+chain. PostgreSQL requires every stored signature to be 64 bytes but does not
+verify signatures; the system keys stay with the workers.
+
 ## Object worker
 
 `relic-object-worker` calculates or independently verifies content digests at

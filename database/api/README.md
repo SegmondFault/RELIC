@@ -31,6 +31,18 @@ permanent Ed25519 public key. Human accounts have exactly one role
   domain-separated canonical bytes, inside the same transaction as the insert.
   Keys supplied in the request are never trusted.
 
+## Database logins
+
+| Login | Used by | May write |
+|---|---|---|
+| `relic_owner` | Migrations and the database operator (NOLOGIN; reached with `SET ROLE`) | Everything. Owns the schema. Creates the first Moderator and system accounts, and is the only one allowed to revoke a system account. |
+| `relic_app` | This API (`RELIC_DATABASE_URL`) | User-signed rows: challenges, registration requests, revocations, flags and responses (and, for the coming submission routes, corpus objects). Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
+| `relic_worker` | `relic-ingest-fidbf`, `relic-chain-bsim`, `relic-checkpoint-mmr` | Appends only: FIDBF admissions (source, batch, binary, FIDBF, functions) and system-signed integrity entries and checkpoints. Reads catalogue data, never contact details, registration requests or login challenges. |
+
+The database checks who a system row names, not its signature, so only the
+workers, which hold the system keys, may append system-signed evidence.
+`tests/test_database_roles.py` pins both privilege sets.
+
 ## Endpoints
 
 Application routes live under `/v1`. List routes accept `limit` (1–500,
@@ -93,7 +105,8 @@ designed).
   (`object_data` of BSim and provenance, classification `evidence`) only on
   the single-object route; provenance lists show `has_object_data`.
 - Signatures are returned as stored and are **not re-verified** by these
-  routes; rows admitted before signature checks existed may hold placeholders.
+  routes. The database only accepts 64-byte signatures; checking one needs the
+  signer's key from `/v1/users/{id}` and the canonical bytes.
 
 | Path | Filters | Returns |
 |---|---|---|
@@ -152,7 +165,9 @@ target (or of the flag). Flags and responses are append-only.
 ### Revocations
 
 Implemented. Signed formats: [`docs/authentication.md`](../../docs/authentication.md#revocation-request);
-`relic-sign-challenge request-revocation` and `decide-revocation` produce the bodies.
+`relic-sign-challenge request-revocation` and `decide-revocation` produce the bodies;
+`decide-revocation` verifies the stored request with the requester's registered
+key and shows the target before it signs.
 
 | Method | Path | Role | Description |
 |---|---|---|---|

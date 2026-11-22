@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use relic_crypto::{
     SystemSigner,
     auth::{self, AuthChallenge, Decision, Flag, RegistrationDetails, RevocationRequest},
-    read_secret_file,
+    read_secret_file, verify_digest_signature,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -87,10 +87,20 @@ enum Command {
         key: KeyArgs,
     },
     /// Sign a Moderator's decision on a pending revocation request.
+    ///
+    /// Verifies the request's signature with the requester's registered key
+    /// and shows the target before signing; refuses if either check fails.
     DecideRevocation {
         /// Request JSON returned by `GET /v1/revocations/{id}`.
         #[arg(long)]
         request: PathBuf,
+        /// The requesting Analyst, as returned by `GET /v1/users/{analyst_id}`.
+        #[arg(long)]
+        requester: PathBuf,
+        /// The target, as returned by its read route (e.g. `GET /v1/users/{id}`,
+        /// `GET /v1/fidbf/{id}`). Required unless its type has no read route.
+        #[arg(long)]
+        target: Option<PathBuf>,
         /// The deciding Moderator's own User ID.
         #[arg(long)]
         moderator_id: Uuid,
@@ -192,7 +202,25 @@ struct RevocationFile {
     target_type: String,
     target_id: Uuid,
     reason: String,
+    request_signature: String,
 }
+
+/// A public identity as returned by `GET /v1/users/{id}`.
+#[derive(Debug, Deserialize)]
+struct UserFile {
+    user_id: Uuid,
+    role: Option<String>,
+    public_key: String,
+    revoked: bool,
+}
+
+/// Target types without a read route, whose details cannot be shown yet.
+const UNREADABLE_TARGET_TYPES: [&str; 4] = [
+    "software_component",
+    "software_release",
+    "binary_component_assertion",
+    "behavioural_composition",
+];
 
 #[derive(Debug, Deserialize)]
 struct FlagFile {
@@ -276,10 +304,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         Command::DecideRevocation {
             request,
+            requester,
+            target,
             moderator_id,
             decision,
             key,
-        } => decide_revocation(&request, moderator_id, parse_decision(&decision), &key)?,
+        } => decide_revocation(
+            [&request, &requester],
+            target.as_deref(),
+            moderator_id,
+            parse_decision(&decision),
+            &key,
+        )?,
         Command::Flag {
             viewer_id,
             target_type,
@@ -396,8 +432,12 @@ fn request_revocation(
 }
 
 /// Body for `POST /v1/revocations/{id}/decision`, signed over the request as stored.
+///
+/// Signs only after the stored request verifies with the requester's
+/// registered key, and after showing the target being revoked.
 fn decide_revocation(
-    request: &Path,
+    [request, requester]: [&Path; 2],
+    target: Option<&Path>,
     moderator_id: Uuid,
     verdict: Decision,
     key: &KeyArgs,
@@ -413,14 +453,29 @@ fn decide_revocation(
         target_id: file.target_id.as_bytes(),
         reason: &file.reason,
     };
+    let requester = verify_revocation_request(&file, &stored, requester)?;
+    let target = describe_target(&file, target)?;
+
     // Show exactly what is being signed before signing it.
     eprintln!(
-        "Signing: {} revocation {} of {} {} requested by {}: {}",
+        "Request {} verified: signed by {} ({}, key {}{})",
+        file.revocation_id,
+        requester.user_id,
+        requester.role.as_deref().unwrap_or("no role"),
+        requester.public_key,
+        if requester.revoked {
+            ", now revoked"
+        } else {
+            ""
+        },
+    );
+    eprintln!("Target: {} {}\n{target}", file.target_type, file.target_id);
+    eprintln!(
+        "Signing: {} revocation {} of {} {}: {}",
         verdict.as_str(),
         file.revocation_id,
         file.target_type,
         file.target_id,
-        file.analyst_id,
         file.reason,
     );
     let signer = load_key(key)?;
@@ -431,6 +486,68 @@ fn decide_revocation(
         "decision": verdict.as_str(),
         "signature": hex(&signature),
     }))
+}
+
+/// Check the stored request against the requester's registered key.
+fn verify_revocation_request(
+    file: &RevocationFile,
+    stored: &RevocationRequest<'_>,
+    requester: &Path,
+) -> Result<UserFile, Box<dyn std::error::Error>> {
+    let user: UserFile = serde_json::from_slice(&fs::read(requester)?)?;
+    if user.user_id != file.analyst_id {
+        return Err(format!(
+            "requester file is for {}, but the request names {}",
+            user.user_id, file.analyst_id
+        )
+        .into());
+    }
+    let public_key: [u8; 32] = unhex(&user.public_key)?
+        .try_into()
+        .map_err(|_| "requester public key must be 32 bytes")?;
+    let signature: [u8; 64] = unhex(&file.request_signature)?
+        .try_into()
+        .map_err(|_| "request signature must be 64 bytes")?;
+    verify_digest_signature(
+        &public_key,
+        auth::REVOCATION_REQUEST_SIGNATURE_DOMAIN,
+        &auth::revocation_request_digest(stored),
+        &signature,
+    )
+    .map_err(|_| {
+        format!(
+            "request {} does not verify with the key registered for {}; not signing",
+            file.revocation_id, file.analyst_id
+        )
+    })?;
+    Ok(user)
+}
+
+/// The target as read from its route, after checking it is the request's target.
+fn describe_target(
+    file: &RevocationFile,
+    target: Option<&Path>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let Some(path) = target else {
+        if UNREADABLE_TARGET_TYPES.contains(&file.target_type.as_str()) {
+            return Ok(format!(
+                "(no read route for {} yet; details not shown)",
+                file.target_type
+            ));
+        }
+        return Err(format!(
+            "pass --target with the {} as returned by its read route",
+            file.target_type
+        )
+        .into());
+    };
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    let id_field = format!("{}_id", file.target_type);
+    let target_id = file.target_id.to_string();
+    if value.get(&id_field).and_then(serde_json::Value::as_str) != Some(target_id.as_str()) {
+        return Err(format!("target file is not {} {target_id}", file.target_type).into());
+    }
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 /// Body for `POST /v1/flags`.

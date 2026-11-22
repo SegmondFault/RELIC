@@ -413,7 +413,7 @@ def test_rust_admitted_fidbf_reads_back_exactly(client, database, corpus, header
     )
     signatures = json.loads(signed_path.read_text())["analyst_signatures"]
     subprocess.run(
-        [str(INGEST_FIDBF), "--database-url", database.app_url, "--manifest", str(signed_path),
+        [str(INGEST_FIDBF), "--database-url", database.worker_url, "--manifest", str(signed_path),
          "--fidbf-object", str(obj), "--integrity-system-user-id", str(system_id),
          "--integrity-key", str(system_key)],
         check=True, capture_output=True, text=True,

@@ -246,13 +246,26 @@ curl -s -X POST https://$HOST/v1/revocations \
      -d @revocation.json
 ```
 
-**Decide a revocation** (Moderator):
+**Decide a revocation** (Moderator). The tool first verifies the request's
+signature with the requester's registered key (`--requester`, from
+`/v1/users/{analyst_id}`) and prints the requester and the target
+(`--target`, from the target's read route, e.g. `/v1/users/{id}` or
+`/v1/fidbf/{id}`) on stderr. It refuses to sign if the signature does not
+verify, either file belongs to someone else, the target is not given, or the
+request is no longer pending. `--target` may be omitted only for types without
+a read route yet (software components and releases, binary-component
+assertions, behavioural compositions).
 
 ```bash
 curl -s -H "authorization: Bearer $TOKEN" "https://$HOST/v1/revocations?status=pending"
 curl -s -H "authorization: Bearer $TOKEN" \
      https://$HOST/v1/revocations/$REVOCATION_ID > revocation.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     "https://$HOST/v1/users/$(jq -r .analyst_id revocation.json)" > requester.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     "https://$HOST/v1/users/$(jq -r .target_id revocation.json)" > target.json   # route by target_type
 target/release/relic-sign-challenge decide-revocation --request revocation.json \
+     --requester requester.json --target target.json \
      --moderator-id "$MODERATOR_ID" --decision approved \
      --key ~/.ssh/relic_ed25519 > decision.json
 curl -s -X POST https://$HOST/v1/revocations/$REVOCATION_ID/decision \

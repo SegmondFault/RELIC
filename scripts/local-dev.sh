@@ -117,6 +117,18 @@ login_as() {
         | json_field user_id)"
 }
 
+# Read route for a revocation target type; empty if it has none yet.
+target_route() {
+    case "$1" in
+        user) echo users ;; source) echo sources ;; batch) echo batches ;;
+        binary) echo binaries ;; function) echo functions ;; fidbf) echo fidbf ;;
+        bsim) echo bsim ;; provenance) echo provenance ;;
+        license_assertion) echo license-assertions ;; classification) echo classifications ;;
+        flag) echo flags ;; flag_response) echo flag-responses ;;
+        *) echo "" ;;
+    esac
+}
+
 # cmd_decide <registration|revocation> <approved|rejected> <id> <moderator_key>
 cmd_decide() {
     local kind="$1" decision="$2"; shift 2
@@ -132,8 +144,26 @@ cmd_decide() {
     login_as "$key" "$work"
     curl -sS --fail-with-body "$api/${kind}s/$id" \
         -H "authorization: Bearer $token" > "$work/request.json"
-    "$signer" "decide-$kind" --request "$work/request.json" --moderator-id "$user_id" \
-        --decision "$decision" --key "$key" > "$work/decision.json"
+    local review=()
+    if [[ "$kind" == revocation ]]; then
+        # The signer verifies the request with the requester's registered key
+        # and shows the target before signing.
+        local analyst_id target_type target_id route
+        analyst_id="$(json_field analyst_id < "$work/request.json")"
+        target_type="$(json_field target_type < "$work/request.json")"
+        target_id="$(json_field target_id < "$work/request.json")"
+        curl -sS --fail-with-body "$api/users/$analyst_id" \
+            -H "authorization: Bearer $token" > "$work/requester.json"
+        review+=(--requester "$work/requester.json")
+        route="$(target_route "$target_type")"
+        if [[ -n "$route" ]]; then
+            curl -sS --fail-with-body "$api/$route/$target_id" \
+                -H "authorization: Bearer $token" > "$work/target.json"
+            review+=(--target "$work/target.json")
+        fi
+    fi
+    "$signer" "decide-$kind" --request "$work/request.json" "${review[@]}" \
+        --moderator-id "$user_id" --decision "$decision" --key "$key" > "$work/decision.json"
     curl -sS --fail-with-body -X POST "$api/${kind}s/$id/decision" \
         -H "authorization: Bearer $token" -H 'content-type: application/json' \
         -d @"$work/decision.json"

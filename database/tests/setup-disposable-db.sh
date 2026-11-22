@@ -6,7 +6,8 @@
 #   e.g. setup-disposable-db.sh postgresql://postgres:postgres@127.0.0.1:55432
 #
 # Never point this at a real server: it drops and recreates the `relic`
-# database and resets the relic_app password to RELIC_TEST_APP_PASSWORD.
+# database and resets the relic_app and relic_worker passwords to
+# RELIC_TEST_APP_PASSWORD and RELIC_TEST_WORKER_PASSWORD.
 
 set -euo pipefail
 
@@ -17,6 +18,7 @@ fi
 
 superuser_uri="$1"
 app_password="${RELIC_TEST_APP_PASSWORD:-relic-test-only}"
+worker_password="${RELIC_TEST_WORKER_PASSWORD:-relic-test-only}"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 psql_super() {
@@ -33,9 +35,13 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_app') THEN
         CREATE ROLE relic_app LOGIN;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_worker') THEN
+        CREATE ROLE relic_worker LOGIN;
+    END IF;
 END
 \$\$;
 ALTER ROLE relic_app PASSWORD '$app_password';
+ALTER ROLE relic_worker LOGIN PASSWORD '$worker_password';
 CREATE DATABASE relic OWNER relic_owner;
 SQL
 

@@ -33,7 +33,7 @@ BEGIN
     INSERT INTO source (
         source_id, name, source_type, retrieved_at, submitted_by_analyst_id, signature
     ) VALUES (
-        source_id_value, 'rbac-test-source', 'BSIM', clock_timestamp(), analyst_id, '\x01'
+        source_id_value, 'rbac-test-source', 'BSIM', clock_timestamp(), analyst_id, decode(repeat('01', 64), 'hex')
     );
 
     INSERT INTO pg_temp.t VALUES
@@ -87,7 +87,7 @@ BEGIN
             object_data, sha256, md5, submitted_by_user_id, signature, source_id
         ) VALUES (
             '{"v":1}', repeat('a', 64), repeat('b', 32),
-            (SELECT id FROM pg_temp.t WHERE name = 'viewer'), '\x01',
+            (SELECT id FROM pg_temp.t WHERE name = 'viewer'), decode(repeat('01', 64), 'hex'),
             (SELECT id FROM pg_temp.t WHERE name = 'source')
         );
     EXCEPTION WHEN insufficient_privilege THEN

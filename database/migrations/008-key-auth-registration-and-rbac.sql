@@ -25,12 +25,31 @@
 -- * Flags and flag responses carry 64-byte Ed25519 signatures, a Viewer can
 --   flag a target once, revoked targets and revoked flags take no new flags
 --   or responses, and flag responses can themselves be flagged and revoked.
+-- * Every stored signature (corpus objects, integrity entries, MMR
+--   checkpoints) must be a 64-byte Ed25519 signature.
+-- * Workers get their own login, relic_worker; the API's relic_app can no
+--   longer append to the integrity chain or MMR checkpoints.
 -- * Foreign-key indexes used by filtered catalogue lists also cover the
 --   primary key, so each cursor page is a single index range scan.
 
 \set ON_ERROR_STOP on
 
 BEGIN;
+
+-- The integrity, MMR and FIDBF-admission workers get their own database login,
+-- separate from the API's relic_app (see "Database logins" below). Creating a
+-- role needs the superuser, so this runs before SET ROLE. It starts NOLOGIN;
+-- the operator enables it with a password where workers run:
+--   ALTER ROLE relic_worker LOGIN PASSWORD '...';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_worker') THEN
+        CREATE ROLE relic_worker NOLOGIN;
+    END IF;
+END
+$$;
+GRANT CONNECT ON DATABASE relic TO relic_worker;
+ALTER ROLE relic_worker IN DATABASE relic SET search_path = catalogue, public;
 
 SET ROLE relic_owner;
 SET search_path = catalogue, public;
@@ -740,6 +759,35 @@ DROP INDEX integrity_source_id_idx;
 CREATE INDEX integrity_source_id_idx ON integrity (source_id, integrity_id);
 
 -- ---------------------------------------------------------------------------
+-- Signed evidence: Ed25519 signatures only
+-- ---------------------------------------------------------------------------
+
+-- Schema v1 only required these to be non-empty. Every signature RELIC stores
+-- is a 64-byte Ed25519 signature; anything else is malformed.
+ALTER TABLE source ADD CONSTRAINT source_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE batch ADD CONSTRAINT batch_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE fidbf ADD CONSTRAINT fidbf_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE bsim ADD CONSTRAINT bsim_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE provenance ADD CONSTRAINT provenance_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE license_assertion ADD CONSTRAINT license_assertion_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE binary_component_assertion ADD CONSTRAINT binary_component_assertion_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE behavioural_composition ADD CONSTRAINT behavioural_composition_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE classification ADD CONSTRAINT classification_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE integrity ADD CONSTRAINT integrity_system_signature_ed25519
+    CHECK (octet_length(system_signature) = 64);
+ALTER TABLE mmr_checkpoint ADD CONSTRAINT mmr_checkpoint_system_signature_ed25519
+    CHECK (octet_length(system_signature) = 64);
+
+-- ---------------------------------------------------------------------------
 -- Application privileges
 -- ---------------------------------------------------------------------------
 
@@ -759,9 +807,12 @@ REVOKE UPDATE ON
     integrity
 FROM relic_app;
 
--- Identities are created only through decide_registration().
+-- Identities are created only through decide_registration(), which runs as
+-- relic_owner. Contact details reach Moderators through registration_request;
+-- no route reads or writes user_private, so a compromised API cannot dump or
+-- rewrite them.
 REVOKE INSERT, UPDATE ON user_public FROM relic_app;
-REVOKE INSERT ON user_private FROM relic_app;
+REVOKE SELECT, INSERT, UPDATE ON user_private FROM relic_app;
 
 GRANT SELECT, INSERT, UPDATE ON auth_challenge TO relic_app;
 GRANT SELECT, INSERT ON registration_request TO relic_app;
@@ -771,6 +822,46 @@ REVOKE EXECUTE ON FUNCTION decide_registration(uuid, uuid, registration_decision
 REVOKE EXECUTE ON FUNCTION purge_expired_auth_challenges() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION decide_registration(uuid, uuid, registration_decision, bytea) TO relic_app;
 GRANT EXECUTE ON FUNCTION purge_expired_auth_challenges() TO relic_app;
+
+-- ---------------------------------------------------------------------------
+-- Database logins
+-- ---------------------------------------------------------------------------
+--
+-- relic_owner   NOLOGIN. Owns the schema; migrations and operator actions
+--               (first Moderator, system accounts, revoking a system
+--               account) run as it.
+-- relic_app     The API. Never signs: it verifies user signatures and
+--               stores user-signed rows.
+-- relic_worker  The integrity, MMR and FIDBF-admission workers. The only
+--               login that appends to the integrity chain and MMR
+--               checkpoints, which carry system signatures made with keys
+--               the API never holds.
+--
+-- The database checks who a system row names, not its signature, so a
+-- compromised API could otherwise append forged entries in a system
+-- account's name to a chain that can never be edited.
+
+REVOKE INSERT ON integrity, mmr_checkpoint FROM relic_app;
+
+GRANT USAGE ON SCHEMA catalogue TO relic_worker;
+
+-- Row triggers run with the caller's privileges, so admission must be able to
+-- read what they check. Contact details, registration requests and login
+-- challenges are not catalogue data and stay out of reach.
+GRANT SELECT ON
+    source, batch, binary_record, fidbf, function_record, bsim, function_bsim,
+    provenance, license_assertion, software_component, software_release,
+    binary_component_assertion, behavioural_composition, composition_member,
+    classification, flag, flag_response, revocation, user_public,
+    integrity, mmr_checkpoint
+TO relic_worker;
+
+-- relic-ingest-fidbf admits a source, batch, binary, FIDBF and functions with
+-- one integrity entry; relic-chain-bsim appends integrity entries;
+-- relic-checkpoint-mmr appends checkpoints. Append-only: no UPDATE or DELETE.
+GRANT INSERT ON
+    source, batch, binary_record, fidbf, function_record, integrity, mmr_checkpoint
+TO relic_worker;
 
 RESET ROLE;
 

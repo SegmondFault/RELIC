@@ -488,6 +488,10 @@ def _cli(*args: str) -> dict:
     )
 
 
+def _signer(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([str(SIGNER), *args], capture_output=True, text=True)
+
+
 @pytest.mark.skipif(not SIGNER.exists(), reason="build with: cargo build -p relic-ingest")
 def test_rust_client_revocation(client, database, target, tmp_path: Path):
     analyst_id, analyst_key = _ssh_user(database, tmp_path, "analyst_ed25519", "analyst")
@@ -504,28 +508,80 @@ def test_rust_client_revocation(client, database, target, tmp_path: Path):
     assert created.status_code == 201, created.text
     revocation_id = created.json()["revocation_id"]
 
-    request_path = tmp_path / "revocation.json"
-    request_path.write_text(
-        client.get(f"/v1/revocations/{revocation_id}", headers=moderator_headers).text
-    )
-    decision = _cli(
+    def save(name: str, path: str) -> Path:
+        saved = tmp_path / name
+        saved.write_text(client.get(path, headers=moderator_headers).text)
+        return saved
+
+    request_path = save("revocation.json", f"/v1/revocations/{revocation_id}")
+    requester_path = save("requester.json", f"/v1/users/{analyst_id}")
+    target_path = save("target.json", f"/v1/users/{target.user_id}")
+    decide = [
         "decide-revocation", "--request", str(request_path), "--moderator-id", str(moderator_id),
         "--decision", "approved", "--key", str(moderator_key),
-    )
+    ]
+
+    signed = _signer(*decide, "--requester", str(requester_path), "--target", str(target_path))
+    assert signed.returncode == 0, signed.stderr
+    # The Moderator saw the verified requester and the target before signing.
+    assert f"verified: signed by {analyst_id} (analyst" in signed.stderr
+    assert f'"user_id": "{target.user_id}"' in signed.stderr
     decided = client.post(
-        f"/v1/revocations/{revocation_id}/decision", json=decision, headers=moderator_headers
+        f"/v1/revocations/{revocation_id}/decision",
+        json=json.loads(signed.stdout),
+        headers=moderator_headers,
     )
     assert decided.status_code == 200, decided.text
     assert client.post("/v1/auth/login", json=login_body(client, target)).status_code == 403
 
     # The CLI refuses to sign a request that is no longer pending.
-    request_path.write_text(
-        client.get(f"/v1/revocations/{revocation_id}", headers=moderator_headers).text
-    )
-    refused = subprocess.run(
-        [str(SIGNER), "decide-revocation", "--request", str(request_path),
-         "--moderator-id", str(moderator_id), "--decision", "approved", "--key", str(moderator_key)],
-        capture_output=True,
-        text=True,
-    )
+    save("revocation.json", f"/v1/revocations/{revocation_id}")
+    refused = _signer(*decide, "--requester", str(requester_path), "--target", str(target_path))
     assert refused.returncode != 0 and "already approved" in refused.stderr
+
+
+@pytest.mark.skipif(not SIGNER.exists(), reason="build with: cargo build -p relic-ingest")
+def test_rust_client_refuses_unverified_or_unseen_requests(
+    client, database, analyst, analyst_headers, pending, target, tmp_path: Path
+):
+    moderator_id, moderator_key = _ssh_user(database, tmp_path, "moderator_ed25519", "moderator")
+    headers = bearer(_login_with_cli(client, moderator_id, moderator_key, tmp_path))
+    get = lambda path: client.get(path, headers=headers).json()  # noqa: E731
+
+    def write(name: str, value: dict) -> str:
+        path = tmp_path / name
+        path.write_text(json.dumps(value))
+        return str(path)
+
+    request = get(f"/v1/revocations/{pending['revocation_id']}")
+    requester = get(f"/v1/users/{analyst.user_id}")
+    shown = get(f"/v1/users/{target.user_id}")
+    other_user = get(f"/v1/users/{database.create_user('viewer').user_id}")
+
+    def decide(request: dict, requester: dict, target: dict | None) -> subprocess.CompletedProcess:
+        args = [
+            "decide-revocation", "--request", write("request.json", request),
+            "--requester", write("requester.json", requester),
+            "--moderator-id", str(moderator_id), "--decision", "approved",
+            "--key", str(moderator_key),
+        ]
+        if target is not None:
+            args += ["--target", write("target.json", target)]
+        return _signer(*args)
+
+    assert decide(request, requester, shown).returncode == 0
+
+    cases = {
+        # Stored text altered after the Analyst signed it.
+        "altered reason": (decide({**request, "reason": "Something else"}, requester, shown),
+                           "does not verify"),
+        # A key other than the requester's registered one.
+        "other key": (decide(request, {**requester, "public_key": other_user["public_key"]}, shown),
+                      "does not verify"),
+        "other requester": (decide(request, other_user, shown), "requester file is for"),
+        "target not shown": (decide(request, requester, None), "pass --target"),
+        "wrong target": (decide(request, requester, other_user), "target file is not user"),
+    }
+    for name, (result, message) in cases.items():
+        assert result.returncode != 0 and message in result.stderr, (name, result.stderr)
+        assert result.stdout == "", name

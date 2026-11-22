@@ -112,8 +112,8 @@ anything that changes data must be <b>signed by the account's key</b> and is re-
   <text x="628" y="50" fill="#343a46">schema catalogue</text>
   <text x="628" y="66" fill="#343a46">triggers enforce roles,</text>
   <text x="628" y="80" fill="#343a46">finality, immutability</text>
-  <text x="628" y="96" fill="#343a46">relic_app: append-only</text>
-  <text x="628" y="112" fill="#343a46">on signed evidence</text>
+  <text x="628" y="96" fill="#343a46">relic_app: user rows</text>
+  <text x="628" y="112" fill="#343a46">relic_worker: chain</text>
   <text x="628" y="166" font-size="9.5" fill="#5b6472">last line of defence</text>
   <!-- arrows -->
   <line x1="184" y1="93" x2="220" y2="93" stroke="#5b6472" stroke-width="1.4" marker-end="url(#ar)"/>
@@ -380,7 +380,7 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>Identity<span>deps.py</span></td><td><span class="chip">HS256 only (no alg:none)</span><span class="chip">iss, aud, exp, nbf, iat, jti required</span><span class="chip">token ≤ 2 KB</span><span class="chip">account re-read every request</span><span class="chip">403 wrong role</span></td></tr>
   <tr><td>Input<span>schemas.py</span></td><td><span class="chip">unknown fields → 422</span><span class="chip">lowercase hex, exact lengths</span><span class="chip">signed text rejected, never trimmed</span><span class="chip">no control characters</span><span class="chip">bounded paging</span></td></tr>
   <tr><td>Signatures<span>crypto.py</span></td><td><span class="chip">strict Ed25519 (libsodium)</span><span class="chip">small-order keys rejected</span><span class="chip">domain separation</span><span class="chip">verify before lookup</span><span class="chip">audit log, no secrets</span></td></tr>
-  <tr><td>Database<span>migration 008</span></td><td><span class="chip">5 s statement timeout</span><span class="chip">idle-in-transaction timeout</span><span class="chip">identities immutable, keys unique</span><span class="chip">challenge consumed once, DB clock</span><span class="chip">decisions final</span><span class="chip">evidence append-only for relic_app</span><span class="chip">accounts only via decide_registration()</span></td></tr>
+  <tr><td>Database<span>migration 008</span></td><td><span class="chip">5 s statement timeout</span><span class="chip">idle-in-transaction timeout</span><span class="chip">identities immutable, keys unique</span><span class="chip">challenge consumed once, DB clock</span><span class="chip">decisions final</span><span class="chip">evidence append-only, 64-byte signatures</span><span class="chip">chain: relic_worker only</span><span class="chip">accounts only via decide_registration()</span></td></tr>
 </table>
 
 <h3>Known gaps (as of 22 Nov 2026)</h3>
@@ -400,7 +400,7 @@ $dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
 $dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
 $dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
 $dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
-<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 206 pytest + <code>cargo test</code>.</p>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 214 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

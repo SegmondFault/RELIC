@@ -61,6 +61,7 @@ def make_settings(database_url: str, **overrides) -> Settings:
 class Database:
     super_url: str
     app_url: str
+    worker_url: str
 
     def execute(self, query: str, params: tuple = ()) -> list[tuple]:
         with psycopg.connect(self.super_url, autocommit=True) as conn:
@@ -239,6 +240,7 @@ def database() -> Database:
     return Database(
         super_url=f"{SUPERUSER_URL}/relic",
         app_url=f"postgresql://relic_app:relic-test-only@{parts.hostname}:{parts.port}/relic",
+        worker_url=f"postgresql://relic_worker:relic-test-only@{parts.hostname}:{parts.port}/relic",
     )
 
 
