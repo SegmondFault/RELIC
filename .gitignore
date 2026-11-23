@@ -16,3 +16,4 @@ __pycache__/
 # Private keys
 *_private.pem
 *.key
+id_ed25519
