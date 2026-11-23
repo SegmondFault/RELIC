@@ -16,6 +16,7 @@ from .routers import (
     accounts,
     auth,
     catalogue,
+    components,
     flags,
     health,
     registrations,
@@ -85,7 +86,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
 
     v1 = APIRouter(prefix="/v1", dependencies=[Depends(global_rate_limit)])
-    for module in (auth, accounts, registrations, catalogue, submissions, flags, revocations):
+    for module in (
+        auth, accounts, registrations, catalogue, submissions, components, flags, revocations
+    ):
         v1.include_router(module.router)
     app.include_router(v1)
 

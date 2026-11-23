@@ -210,3 +210,91 @@ def test_owner_fixture_chain_entries_are_reported(database, client, tmp_path: Pa
 def test_unreachable_database_exits_2():
     code, output = run_verify("postgresql://nobody:wrong@127.0.0.1:1/relic")
     assert code == 2 and "could not run" in output
+
+
+def test_component_model_rows_verify_and_forgeries_are_reported(client, database):
+    """Components, releases, component assertions and compositions written through
+    the API verify; rows a compromised API writes with bad signatures do not."""
+    from .test_components_api import (
+        assertion_body, component_body, composition_body, default_members, release_body,
+    )
+
+    analyst = database.create_user("analyst")
+    headers = bearer(login(client, analyst))
+    owner = database.create_user("analyst")
+    source, batch, binary, function = (uuid.uuid4() for _ in range(4))
+    database.execute(
+        "INSERT INTO catalogue.source (source_id, name, source_type, retrieved_at,"
+        " submitted_by_analyst_id, signature) VALUES (%s, 'v', 'FIDBF', clock_timestamp(), %s, %s)",
+        (source, owner.user_id, b"\x11" * 64),
+    )
+    database.execute(
+        "INSERT INTO catalogue.batch (batch_id, md5, content_sha256, analyst_user_id, signature)"
+        " VALUES (%s, %s, %s, %s, %s)",
+        (batch, "a" * 32, "b" * 64, owner.user_id, b"\x11" * 64),
+    )
+    database.execute(
+        "INSERT INTO catalogue.binary_record (binary_id, batch_id, source_id, content_sha256,"
+        " content_md5, size_bytes, created_by) VALUES (%s, %s, %s, %s, %s, 1, %s)",
+        (binary, batch, source, uuid.uuid4().hex * 2, uuid.uuid4().hex, owner.user_id),
+    )
+    database.execute(
+        "INSERT INTO catalogue.function_record (function_id, binary_id, full_hash, specific_hash)"
+        " VALUES (%s, %s, %s, %s)",
+        (function, binary, "0" * 16, "1" * 16),
+    )
+
+    class Objects:
+        binary_id, function_id = binary, function
+
+    def created(path: str, body: dict, key: str) -> uuid.UUID:
+        response = client.post(f"/v1/{path}", json=body, headers=headers)
+        assert response.status_code == 201, response.text
+        return uuid.UUID(response.json()[key])
+
+    component = created("software-components", component_body(analyst), "component_id")
+    release = created(
+        "software-releases", release_body(analyst, component, source_id=source),
+        "software_release_id",
+    )
+    assertion = created(
+        "binary-component-assertions", assertion_body(analyst, binary, release),
+        "binary_component_assertion_id",
+    )
+    composition = created(
+        "behavioural-compositions", composition_body(analyst, default_members(Objects)),
+        "behavioural_composition_id",
+    )
+    genuine = [component, release, assertion, composition]
+    code, report = verify_json(database)
+    for row_id in genuine:
+        assert failures_for(report, row_id) == [], row_id
+    for kind in ("software components", "software releases", "binary-component assertions",
+                 "behavioural compositions"):
+        assert report["checked"].get(kind, 0) > 0, kind
+    assert not any("composition" in kind or "component" in kind for kind in report["unchecked"])
+
+    # As a compromised API (relic_app) could write them: valid shape, bad signature.
+    forged_component, forged_composition = uuid.uuid4(), uuid.uuid4()
+    with psycopg.connect(database.app_url) as conn:
+        conn.execute(
+            "INSERT INTO catalogue.software_component (component_id, name, component_kind,"
+            " created_by_analyst_id, signature) VALUES (%s, 'forged', 'library', %s, %s)",
+            (forged_component, analyst.user_id, b"\x0c" * 64),
+        )
+        conn.execute(
+            "INSERT INTO catalogue.behavioural_composition (behavioural_composition_id, name,"
+            " member_count, submitted_by_analyst_id, signature) VALUES (%s, 'forged', 1, %s, %s)",
+            (forged_composition, analyst.user_id, b"\x0d" * 64),
+        )
+        conn.execute(
+            "INSERT INTO catalogue.composition_member (behavioural_composition_id, target_type,"
+            " target_id, member_role) VALUES (%s, 'binary', %s, 'x')",
+            (forged_composition, binary),
+        )
+    code, report = verify_json(database)
+    assert code == 1
+    for row_id in (forged_component, forged_composition):
+        assert any("does not verify" in p for p in failures_for(report, row_id)), row_id
+    for row_id in genuine:
+        assert failures_for(report, row_id) == [], row_id

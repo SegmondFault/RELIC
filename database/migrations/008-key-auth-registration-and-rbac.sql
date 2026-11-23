@@ -612,6 +612,169 @@ BEFORE INSERT OR UPDATE OR DELETE ON classification
 FOR EACH ROW EXECUTE FUNCTION guard_classification();
 
 -- ---------------------------------------------------------------------------
+-- Software components, releases, component assertions, compositions
+-- ---------------------------------------------------------------------------
+
+-- Every row an Analyst writes is signed. Components and releases had no
+-- signature in schema v1; the database is empty when 008 runs.
+ALTER TABLE software_component
+    ADD COLUMN signature bytea NOT NULL,
+    ADD CONSTRAINT software_component_signature_ed25519 CHECK (octet_length(signature) = 64),
+    ADD CONSTRAINT software_component_namespace_nonblank
+        CHECK (namespace IS NULL OR btrim(namespace) <> ''),
+    ADD CONSTRAINT software_component_purl_syntax
+        CHECK (purl IS NULL OR purl ~ '^pkg:[a-z][a-z0-9.+-]*/[^[:space:]]+$');
+
+ALTER TABLE software_release
+    ADD COLUMN signature bytea NOT NULL,
+    ADD CONSTRAINT software_release_signature_ed25519 CHECK (octet_length(signature) = 64),
+    ADD CONSTRAINT software_release_version_nonblank
+        CHECK (version IS NULL OR btrim(version) <> '');
+
+-- A composition is signed together with its full member list, so the members
+-- are written in the composition's own transaction and never later: the row
+-- states how many there are, a member beyond that count is refused, and at
+-- commit the count must be reached. A compromised API therefore cannot add a
+-- member to an existing (perhaps already classified) composition.
+ALTER TABLE behavioural_composition
+    ADD COLUMN member_count integer NOT NULL,
+    ADD CONSTRAINT behavioural_composition_member_count
+        CHECK (member_count BETWEEN 1 AND 500),
+    ADD CONSTRAINT behavioural_composition_description_nonblank
+        CHECK (description IS NULL OR btrim(description) <> '');
+
+COMMENT ON COLUMN behavioural_composition.member_count IS
+    'Number of members, all signed with the composition and written in its transaction.';
+
+CREATE FUNCTION stamp_created_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER software_component_stamped
+BEFORE INSERT ON software_component
+FOR EACH ROW EXECUTE FUNCTION stamp_created_at();
+
+-- Nothing new is built on a revoked row (as for flags and claims).
+CREATE FUNCTION guard_software_release()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('software_component', NEW.component_id) THEN
+        RAISE EXCEPTION 'Software component % is revoked', NEW.component_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.source_id IS NOT NULL AND target_is_revoked('source', NEW.source_id) THEN
+        RAISE EXCEPTION 'Source % is revoked', NEW.source_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER software_release_target_not_revoked
+BEFORE INSERT ON software_release
+FOR EACH ROW EXECUTE FUNCTION guard_software_release();
+
+CREATE FUNCTION guard_binary_component_assertion()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Binary % is revoked', NEW.binary_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked('software_release', NEW.software_release_id)
+       OR target_is_revoked('software_component', (
+              SELECT component_id FROM software_release
+               WHERE software_release_id = NEW.software_release_id)) THEN
+        RAISE EXCEPTION 'Software release % or its component is revoked', NEW.software_release_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER binary_component_assertion_target_not_revoked
+BEFORE INSERT ON binary_component_assertion
+FOR EACH ROW EXECUTE FUNCTION guard_binary_component_assertion();
+
+CREATE TRIGGER behavioural_composition_stamped
+BEFORE INSERT ON behavioural_composition
+FOR EACH ROW EXECUTE FUNCTION stamp_created_at();
+
+CREATE FUNCTION guard_composition_member()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    expected integer;
+BEGIN
+    -- No lock needed: until its transaction commits, no other transaction
+    -- sees the composition (so cannot reference it), and once committed it
+    -- already has every member.
+    SELECT member_count INTO expected
+      FROM behavioural_composition
+     WHERE behavioural_composition_id = NEW.behavioural_composition_id;
+    IF (SELECT count(*) FROM composition_member
+         WHERE behavioural_composition_id = NEW.behavioural_composition_id) >= expected THEN
+        RAISE EXCEPTION 'Behavioural composition % already has all % members',
+            NEW.behavioural_composition_id, expected
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the existence and classification checks.
+CREATE TRIGGER composition_member_within_count
+BEFORE INSERT ON composition_member
+FOR EACH ROW EXECUTE FUNCTION guard_composition_member();
+
+CREATE FUNCTION check_composition_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    present integer;
+BEGIN
+    SELECT count(*) INTO present FROM composition_member
+     WHERE behavioural_composition_id = NEW.behavioural_composition_id;
+    IF present <> NEW.member_count THEN
+        RAISE EXCEPTION 'Behavioural composition % has % of its % members',
+            NEW.behavioural_composition_id, present, NEW.member_count
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Checked at commit, once the composition's transaction has written its members.
+CREATE CONSTRAINT TRIGGER behavioural_composition_members_complete
+AFTER INSERT ON behavioural_composition
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION check_composition_complete();
+
+-- ---------------------------------------------------------------------------
 -- Two-Moderator approval for Moderator powers
 -- ---------------------------------------------------------------------------
 
@@ -1027,6 +1190,23 @@ CREATE INDEX flag_target_idx ON flag (target_type, target_id, flag_id);
 DROP INDEX flag_response_flag_id_idx;
 CREATE INDEX flag_response_flag_id_idx ON flag_response (flag_id, flag_response_id);
 
+DROP INDEX software_release_component_idx;
+CREATE INDEX software_release_component_idx
+    ON software_release (component_id, software_release_id);
+DROP INDEX software_release_source_idx;
+CREATE INDEX software_release_source_idx
+    ON software_release (source_id, software_release_id)
+    WHERE source_id IS NOT NULL;
+CREATE INDEX software_component_purl_idx
+    ON software_component (purl, component_id)
+    WHERE purl IS NOT NULL;
+DROP INDEX binary_component_assertion_binary_idx;
+CREATE INDEX binary_component_assertion_binary_idx
+    ON binary_component_assertion (binary_id, binary_component_assertion_id);
+DROP INDEX binary_component_assertion_release_idx;
+CREATE INDEX binary_component_assertion_release_idx
+    ON binary_component_assertion (software_release_id, binary_component_assertion_id);
+
 DROP INDEX integrity_source_id_idx;
 CREATE INDEX integrity_source_id_idx ON integrity (source_id, integrity_id);
 
@@ -1135,6 +1315,13 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FRO
 
 -- POST /v1/license-assertions and POST /v1/classifications.
 GRANT INSERT ON license_assertion, classification TO relic_app;
+
+-- POST /v1/software-components, /v1/software-releases,
+-- /v1/binary-component-assertions and /v1/behavioural-compositions.
+GRANT INSERT ON
+    software_component, software_release, binary_component_assertion,
+    behavioural_composition, composition_member
+TO relic_app;
 
 GRANT USAGE ON SCHEMA catalogue TO relic_worker;
 

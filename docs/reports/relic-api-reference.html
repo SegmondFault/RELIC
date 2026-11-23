@@ -137,7 +137,7 @@ account stays visible, marked revoked.</p>
   <tr><th>Capability</th><th style="width:62px">Viewer</th><th style="width:62px">Analyst</th><th style="width:72px">Moderator</th><th style="width:62px">System</th><th style="width:70px">Status</th></tr>
   <tr><td>Log in, read catalogue (<code>GET /v1/…</code>)</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Flag an object, account, flag or response (once per target)</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Assert licences, classify binaries and functions</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Assert licences, classify; name components and releases, link binaries to them, define compositions</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Submit sources, batches, FIDBF, BSim, provenance</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
   <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
@@ -359,13 +359,13 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>POST</td><td class="mono">/v1/accounts</td><td>anyone</td><td>202 pending request · 401 bad proof · 409 key already used</td></tr>
   <tr><td>GET</td><td class="mono">/v1/me</td><td>logged in</td><td>own User ID, role, owner type, public key</td></tr>
   <tr><td>GET</td><td class="mono">/v1/users[/{id}]</td><td>logged in</td><td>public identities; never name or email</td></tr>
-  <tr><td>GET</td><td class="mono">/v1/&lt;resource&gt;<br>/v1/&lt;resource&gt;/{id}</td><td>logged in</td><td>Catalogue reads. <i>resource</i>: sources, batches, binaries, functions, fidbf, bsim, function-bsim, provenance, license-assertions, classifications, flags, flag-responses, integrity, mmr-checkpoints (also <code>/latest</code>). Lists page with <code>?after=&lt;last id&gt;</code>; signatures hex; 64-bit numbers as strings; <code>revoked</code> per object; no storage paths; large JSON only on <code>/{id}</code></td></tr>
+  <tr><td>GET</td><td class="mono">/v1/&lt;resource&gt;<br>/v1/&lt;resource&gt;/{id}</td><td>logged in</td><td>Catalogue reads. <i>resource</i>: sources, batches, binaries, functions, fidbf, bsim, function-bsim, provenance, license-assertions, classifications, software-components, software-releases, binary-component-assertions, behavioural-compositions, flags, flag-responses, integrity, mmr-checkpoints (also <code>/latest</code>). Lists page with <code>?after=&lt;last id&gt;</code>; signatures hex; 64-bit numbers as strings; <code>revoked</code> per object; no storage paths; large JSON only on <code>/{id}</code></td></tr>
   <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 · 202 first of two (new Moderator) · 403 bad signature · 409 decided or already approved</td></tr>
   <tr><td>GET</td><td class="mono">/v1/revocations[/{id}]</td><td>logged in</td><td>requests and decisions with both signatures; filter <code>status</code>, <code>target_type</code>, <code>target_id</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature or system account · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 · 202 first of two (Moderator target) · 403 bad signature or own account · 409 decided; account revocation is immediate</td></tr>
-  <tr><td>POST</td><td class="mono">/v1/license-assertions<br>/v1/classifications</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 409 target revoked or ID reused · 422 invalid or unknown target</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/license-assertions<br>/v1/classifications<br>/v1/software-components<br>/v1/software-releases<br>/v1/binary-component-assertions<br>/v1/behavioural-compositions</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 409 target revoked or ID reused · 422 invalid or unknown target. A composition is signed with all its members and written with them in one transaction; the database refuses members added later</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags</td><td>Viewer · signed</td><td>201 · 200 retry · 403 bad signature · 409 already flagged, target revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags/{id}/responses</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 404 unknown flag · 409 flag revoked or ID reused</td></tr>
 </table>
@@ -385,7 +385,7 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>Database<span>migration 008</span></td><td><span class="chip">5 s statement timeout</span><span class="chip">idle-in-transaction timeout</span><span class="chip">identities immutable, keys unique</span><span class="chip">challenge consumed once, DB clock</span><span class="chip">decisions final</span><span class="chip">evidence append-only, 64-byte signatures</span><span class="chip">chain: relic_worker only</span><span class="chip">accounts only via decide_registration()</span></td></tr>
 </table>
 
-<h3>Known gaps (as of 22 Nov 2026)</h3>
+<h3>Known gaps (as of 23 Nov 2026)</h3>
 <table class="keep">
   <tr><th style="width:210px">Gap</th><th>Effect · direction</th></tr>
   <tr><td>Signatures checked later</td><td>The database does not verify signatures: a compromised API can still store forged user-signed rows. relic-verify detects them on its next run.</td></tr>
@@ -402,7 +402,7 @@ $dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
 $dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
 $dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
 $dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
-<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 272 pytest + <code>cargo test</code>.</p>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 368 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

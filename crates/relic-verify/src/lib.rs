@@ -28,6 +28,8 @@ use relic_integrity_worker::{
     BsimRecord, IntegrityEnvelope, SignedIntegrityEntry, bsim_record_hash,
 };
 use relic_mmr_worker::{MmrFrontier, Peak, SignedCheckpoint};
+
+mod components;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -115,6 +117,7 @@ pub fn verify(client: &mut Client) -> Result<Report, postgres::Error> {
     flags(&mut tx, &accounts, &mut report)?;
     license_assertions(&mut tx, &accounts, &mut report)?;
     classifications(&mut tx, &accounts, &mut report)?;
+    components::verify(&mut tx, &accounts, &mut report)?;
     sources(&mut tx, &accounts, &mut report)?;
 
     let chain = integrity_chain(&mut tx, &accounts, &mut report)?;
@@ -1202,14 +1205,6 @@ fn not_checkable(tx: &mut Transaction<'_>, report: &mut Report) -> Result<(), po
         (
             "provenance (no format yet)",
             "SELECT count(*) FROM catalogue.provenance",
-        ),
-        (
-            "behavioural compositions (no format yet)",
-            "SELECT count(*) FROM catalogue.behavioural_composition",
-        ),
-        (
-            "binary-component assertions (no format yet)",
-            "SELECT count(*) FROM catalogue.binary_component_assertion",
         ),
         (
             "batches outside FIDBF admissions",

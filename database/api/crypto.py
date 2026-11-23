@@ -37,6 +37,15 @@ LICENSE_ASSERTION_RECORD_DOMAIN = b"RELIC:license-assertion:v1"
 LICENSE_ASSERTION_SIGNATURE_DOMAIN = b"RELIC:license-assertion-signature:v1"
 CLASSIFICATION_RECORD_DOMAIN = b"RELIC:classification:v1"
 CLASSIFICATION_SIGNATURE_DOMAIN = b"RELIC:classification-signature:v1"
+SOFTWARE_COMPONENT_RECORD_DOMAIN = b"RELIC:software-component:v1"
+SOFTWARE_COMPONENT_SIGNATURE_DOMAIN = b"RELIC:software-component-signature:v1"
+SOFTWARE_RELEASE_RECORD_DOMAIN = b"RELIC:software-release:v1"
+SOFTWARE_RELEASE_SIGNATURE_DOMAIN = b"RELIC:software-release-signature:v1"
+BINARY_COMPONENT_ASSERTION_RECORD_DOMAIN = b"RELIC:binary-component-assertion:v1"
+BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN = b"RELIC:binary-component-assertion-signature:v1"
+BEHAVIOURAL_COMPOSITION_RECORD_DOMAIN = b"RELIC:behavioural-composition:v1"
+BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN = b"RELIC:behavioural-composition-signature:v1"
+COMPOSITION_MEMBER_DOMAIN = b"RELIC:composition-member:v1"
 
 PUBLIC_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
@@ -273,6 +282,141 @@ def classification_record(classification: Classification) -> bytes:
         ],
     )
 
+
+
+def _optional_id(value: UUID | None) -> bytes:
+    return encode_optional_bytes(value.bytes if value else None)
+
+
+@dataclass(frozen=True)
+class SoftwareComponent:
+    """An Analyst's normalised software identity (not a claim about any binary)."""
+
+    component_id: UUID
+    analyst_id: UUID
+    name: str
+    component_kind: str
+    namespace: str | None
+    purl: str | None
+
+
+def software_component_record(component: SoftwareComponent) -> bytes:
+    return encode_fields(
+        SOFTWARE_COMPONENT_RECORD_DOMAIN,
+        [
+            component.component_id.bytes,
+            component.analyst_id.bytes,
+            component.name.encode("utf-8"),
+            component.component_kind.encode("utf-8"),
+            encode_optional(component.namespace),
+            encode_optional(component.purl),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class SoftwareRelease:
+    """A release of a software component; version and source may be unknown."""
+
+    software_release_id: UUID
+    analyst_id: UUID
+    component_id: UUID
+    version: str | None
+    source_id: UUID | None
+
+
+def software_release_record(release: SoftwareRelease) -> bytes:
+    return encode_fields(
+        SOFTWARE_RELEASE_RECORD_DOMAIN,
+        [
+            release.software_release_id.bytes,
+            release.analyst_id.bytes,
+            release.component_id.bytes,
+            encode_optional(release.version),
+            _optional_id(release.source_id),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class BinaryComponentAssertion:
+    """An Analyst's claim that a binary relates to a software release."""
+
+    binary_component_assertion_id: UUID
+    analyst_id: UUID
+    binary_id: UUID
+    software_release_id: UUID
+    relationship: str
+    basis: str
+    confidence: str | None
+    evidence_provenance_id: UUID | None
+
+
+def binary_component_assertion_record(assertion: BinaryComponentAssertion) -> bytes:
+    return encode_fields(
+        BINARY_COMPONENT_ASSERTION_RECORD_DOMAIN,
+        [
+            assertion.binary_component_assertion_id.bytes,
+            assertion.analyst_id.bytes,
+            assertion.binary_id.bytes,
+            assertion.software_release_id.bytes,
+            assertion.relationship.encode("utf-8"),
+            assertion.basis.encode("utf-8"),
+            encode_optional(assertion.confidence),
+            _optional_id(assertion.evidence_provenance_id),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class CompositionMember:
+    """One exact binary or function in a behavioural composition."""
+
+    target_type: str
+    target_id: UUID
+    member_role: str
+    sequence_number: int | None
+
+
+def composition_member_record(member: CompositionMember) -> bytes:
+    sequence = None if member.sequence_number is None else member.sequence_number.to_bytes(4, "big")
+    return encode_fields(
+        COMPOSITION_MEMBER_DOMAIN,
+        [
+            member.target_type.encode("utf-8"),
+            member.target_id.bytes,
+            member.member_role.encode("utf-8"),
+            encode_optional_bytes(sequence),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class BehaviouralComposition:
+    """A set or sequence of binaries and functions; the signature covers every member."""
+
+    behavioural_composition_id: UUID
+    analyst_id: UUID
+    name: str
+    description: str | None
+    evidence_provenance_id: UUID | None
+    members: tuple[CompositionMember, ...]
+
+
+def behavioural_composition_record(composition: BehaviouralComposition) -> bytes:
+    """Members are sorted by their encoded bytes, so their order does not matter."""
+    members = sorted(composition_member_record(member) for member in composition.members)
+    return encode_fields(
+        BEHAVIOURAL_COMPOSITION_RECORD_DOMAIN,
+        [
+            composition.behavioural_composition_id.bytes,
+            composition.analyst_id.bytes,
+            composition.name.encode("utf-8"),
+            encode_optional(composition.description),
+            _optional_id(composition.evidence_provenance_id),
+            b"".join(_framed(member) for member in members),
+        ],
+    )
 
 def verify(public_key: bytes, signature_domain: bytes, record: bytes, signature: bytes) -> bool:
     """Strictly verify a domain-separated signature over ``SHA-256(record)``."""

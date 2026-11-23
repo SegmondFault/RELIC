@@ -13,10 +13,9 @@ storage.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response
-from psycopg import errors
+from fastapi import APIRouter, Depends, Response
 
 from ..crypto import (
     CLASSIFICATION_SIGNATURE_DOMAIN,
@@ -25,15 +24,15 @@ from ..crypto import (
     LicenseAssertion as SignedLicenseAssertion,
     classification_record,
     license_assertion_record,
-    verify,
 )
-from ..deps import ConnDep, Identity, current_identity, registered_key, require_roles
+from ..deps import ConnDep, Identity, current_identity, require_roles
 from ..schemas import (
     ClassificationDetail,
     ClassificationSubmission,
     LicenseAssertion,
     LicenseAssertionSubmission,
 )
+from ._claims import admit, fields_match, verified_signature
 from ._stubs import todo
 from .catalogue import CLASSIFICATIONS, LICENSE_ASSERTIONS
 
@@ -41,24 +40,6 @@ AnalystDep = Annotated[Identity, Depends(require_roles("analyst"))]
 
 router = APIRouter(dependencies=[Depends(current_identity)], tags=["submissions"])
 audit = logging.getLogger("relic.audit")
-
-
-async def _verified(conn: ConnDep, analyst: Identity, claimed: Any, domain: bytes,
-                    record: bytes, signature: str, what: str) -> bytes:
-    """The caller's signature over ``record``, checked with their registered key."""
-    if claimed != analyst.user_id:
-        raise HTTPException(status_code=403, detail="analyst_id must be the authenticated account")
-    raw = bytes.fromhex(signature)
-    if not verify(await registered_key(conn, analyst.user_id), domain, record, raw):
-        audit.warning("%s signature rejected analyst=%s", what, analyst.user_id)
-        raise HTTPException(status_code=403, detail=f"{what.capitalize()} signature rejected")
-    return raw
-
-
-def _conflict(exc: errors.UniqueViolation, id_field: str) -> HTTPException:
-    if (exc.diag.constraint_name or "").endswith("_pkey"):
-        return HTTPException(status_code=409, detail=f"{id_field} is already used")
-    return HTTPException(status_code=409, detail=exc.diag.message_primary or "Conflict")
 
 
 # ---------------------------------------------------------------------------
@@ -98,43 +79,39 @@ async def submit_license_assertion(
         confidence=body.confidence,
         evidence_provenance_id=body.evidence_provenance_id,
     )
+
+    async def insert() -> dict:
+        cur = await conn.execute(
+            _LICENSE_INSERT,
+            (
+                body.license_assertion_id,
+                body.target_id if body.target_type == "source" else None,
+                body.target_id if body.target_type == "binary" else None,
+                body.spdx_expression, body.basis, body.confidence,
+                body.evidence_provenance_id, body.analyst_id, signature,
+            ),
+        )
+        return await cur.fetchone()
+
     async with conn.transaction():
-        signature = await _verified(
+        signature = await verified_signature(
             conn, analyst, body.analyst_id, LICENSE_ASSERTION_SIGNATURE_DOMAIN,
             license_assertion_record(claim), body.signature, "licence assertion",
         )
-        cur = await conn.execute(_LICENSE_SELECT, (body.license_assertion_id,))
-        existing = await cur.fetchone()
-        if existing is not None:
-            same = existing["signature"] == body.signature and (
-                existing["submitted_by_analyst_id"], existing["target_type"],
-                existing["target_id"], existing["spdx_expression"], existing["basis"],
-                existing["confidence"], existing["evidence_provenance_id"],
-            ) == (
-                body.analyst_id, body.target_type, body.target_id, body.spdx_expression,
-                body.basis, body.confidence, body.evidence_provenance_id,
-            )
-            if not same:
-                raise HTTPException(
-                    status_code=409,
-                    detail="license_assertion_id is already used for a different assertion",
-                )
-            response.status_code = 200
-            return existing
-        try:
-            cur = await conn.execute(
-                _LICENSE_INSERT,
-                (
-                    body.license_assertion_id,
-                    body.target_id if body.target_type == "source" else None,
-                    body.target_id if body.target_type == "binary" else None,
-                    body.spdx_expression, body.basis, body.confidence,
-                    body.evidence_provenance_id, body.analyst_id, signature,
-                ),
-            )
-        except errors.UniqueViolation as exc:
-            raise _conflict(exc, "license_assertion_id") from exc
-        row = await cur.fetchone()
+        row = await admit(
+            conn, response, select=_LICENSE_SELECT, key=body.license_assertion_id,
+            insert=insert, id_field="license_assertion_id", what="assertion",
+            same=lambda row: fields_match(row, {
+                "signature": body.signature,
+                "submitted_by_analyst_id": body.analyst_id,
+                "target_type": body.target_type,
+                "target_id": body.target_id,
+                "spdx_expression": body.spdx_expression,
+                "basis": body.basis,
+                "confidence": body.confidence,
+                "evidence_provenance_id": body.evidence_provenance_id,
+            }),
+        )
     audit.info(
         "licence assertion id=%s target=%s:%s analyst=%s",
         body.license_assertion_id, body.target_type, body.target_id, body.analyst_id,
@@ -183,41 +160,38 @@ async def submit_classification(
         misp_uuid=body.misp_uuid,
         evidence_json=body.evidence_json,
     )
+
+    async def insert() -> dict:
+        cur = await conn.execute(
+            _CLASSIFICATION_INSERT,
+            (
+                body.classification_id, body.target_type, body.target_id, body.label,
+                body.confidence, body.analyst_id, body.misp_universe, body.misp_uuid,
+                body.evidence_json, body.evidence_json, signature,
+            ),
+        )
+        return await cur.fetchone()
+
     async with conn.transaction():
-        signature = await _verified(
+        signature = await verified_signature(
             conn, analyst, body.analyst_id, CLASSIFICATION_SIGNATURE_DOMAIN,
             classification_record(claim), body.signature, "classification",
         )
-        cur = await conn.execute(_CLASSIFICATION_SELECT, (body.classification_id,))
-        existing = await cur.fetchone()
-        if existing is not None:
-            same = existing["signature"] == body.signature and (
-                existing["analyst_id"], existing["target_type"], existing["target_id"],
-                existing["label"], existing["confidence"], existing["misp_universe"],
-                existing["misp_uuid"], existing["evidence_json"],
-            ) == (
-                body.analyst_id, body.target_type, body.target_id, body.label,
-                body.confidence, body.misp_universe, body.misp_uuid, body.evidence_json,
-            )
-            if not same:
-                raise HTTPException(
-                    status_code=409,
-                    detail="classification_id is already used for a different classification",
-                )
-            response.status_code = 200
-            return existing
-        try:
-            cur = await conn.execute(
-                _CLASSIFICATION_INSERT,
-                (
-                    body.classification_id, body.target_type, body.target_id, body.label,
-                    body.confidence, body.analyst_id, body.misp_universe, body.misp_uuid,
-                    body.evidence_json, body.evidence_json, signature,
-                ),
-            )
-        except errors.UniqueViolation as exc:
-            raise _conflict(exc, "classification_id") from exc
-        row = await cur.fetchone()
+        row = await admit(
+            conn, response, select=_CLASSIFICATION_SELECT, key=body.classification_id,
+            insert=insert, id_field="classification_id", what="classification",
+            same=lambda row: fields_match(row, {
+                "signature": body.signature,
+                "analyst_id": body.analyst_id,
+                "target_type": body.target_type,
+                "target_id": body.target_id,
+                "label": body.label,
+                "confidence": body.confidence,
+                "misp_universe": body.misp_universe,
+                "misp_uuid": body.misp_uuid,
+                "evidence_json": body.evidence_json,
+            }),
+        )
     audit.info(
         "classification id=%s target=%s:%s analyst=%s",
         body.classification_id, body.target_type, body.target_id, body.analyst_id,

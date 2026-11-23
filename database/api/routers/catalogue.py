@@ -23,7 +23,10 @@ from psycopg import sql
 from ..deps import ConnDep, current_identity
 from ..schemas import (
     Batch,
+    BehaviouralComposition,
+    BehaviouralCompositionDetail,
     Binary,
+    BinaryComponentAssertion,
     Bsim,
     BsimDetail,
     Classification,
@@ -37,10 +40,13 @@ from ..schemas import (
     IntegrityEntry,
     LicenseAssertion,
     Md5,
+    MemberType,
     MmrCheckpoint,
     Provenance,
     ProvenanceDetail,
     Sha256,
+    SoftwareComponent,
+    SoftwareRelease,
     Source,
     TargetType,
     UserPublic,
@@ -121,10 +127,20 @@ class _Filter:
 
 
 async def _list(
-    conn: ConnDep, resource: _Resource, *, after: Any, limit: int, filters: Sequence[_Filter] = ()
+    conn: ConnDep,
+    resource: _Resource,
+    *,
+    after: Any,
+    limit: int,
+    filters: Sequence[_Filter] = (),
+    extra: tuple[str, Sequence[Any]] | None = None,
 ) -> list[dict]:
+    """``extra`` is a constant SQL condition on ``t`` with its parameters."""
     clauses: list[sql.Composable] = []
     params: list[Any] = []
+    if extra is not None:
+        clauses.append(sql.SQL(extra[0]))
+        params.extend(extra[1])
     for item in filters:
         if item.value is None:
             continue
@@ -259,6 +275,54 @@ CLASSIFICATIONS = _Resource(
         t.created_at, encode(t.signature, 'hex') AS signature,
         {_revoked('classification', 'classification_id')}""",
     detail="t.evidence, t.evidence_json",
+)
+
+SOFTWARE_COMPONENTS = _Resource(
+    table="catalogue.software_component",
+    key="component_id",
+    name="Software component",
+    columns=f"""t.component_id, t.name, t.component_kind, t.namespace, t.purl, t.created_at,
+        t.created_by_analyst_id, encode(t.signature, 'hex') AS signature,
+        {_revoked('software_component', 'component_id')}""",
+)
+
+SOFTWARE_RELEASES = _Resource(
+    table="catalogue.software_release",
+    key="software_release_id",
+    name="Software release",
+    columns=f"""t.software_release_id, t.component_id, t.version, t.source_id, t.created_at,
+        t.created_by_analyst_id, encode(t.signature, 'hex') AS signature,
+        {_revoked('software_release', 'software_release_id')}""",
+)
+
+BINARY_COMPONENT_ASSERTIONS = _Resource(
+    table="catalogue.binary_component_assertion",
+    key="binary_component_assertion_id",
+    name="Binary-component assertion",
+    columns=f"""t.binary_component_assertion_id, t.binary_id, t.software_release_id,
+        t.relationship::text AS relationship, t.basis::text AS basis,
+        t.confidence::text AS confidence, t.evidence_provenance_id, t.created_at,
+        t.submitted_by_analyst_id, encode(t.signature, 'hex') AS signature,
+        {_revoked('binary_component_assertion', 'binary_component_assertion_id')}""",
+)
+
+BEHAVIOURAL_COMPOSITIONS = _Resource(
+    table="catalogue.behavioural_composition",
+    key="behavioural_composition_id",
+    name="Behavioural composition",
+    columns=f"""t.behavioural_composition_id, t.name, t.description, t.evidence_provenance_id,
+        t.member_count, t.created_at, t.submitted_by_analyst_id,
+        encode(t.signature, 'hex') AS signature,
+        {_revoked('behavioural_composition', 'behavioural_composition_id')}""",
+    detail="""coalesce((
+        SELECT json_agg(json_build_object(
+                   'target_type', m.target_type, 'target_id', m.target_id,
+                   'member_role', m.member_role, 'sequence_number', m.sequence_number)
+                 ORDER BY m.sequence_number NULLS LAST, m.target_type, m.target_id,
+                          m.member_role)
+          FROM catalogue.composition_member AS m
+         WHERE m.behavioural_composition_id = t.behavioural_composition_id), '[]'::json)
+        AS members""",
 )
 
 FLAGS = _Resource(
@@ -483,6 +547,96 @@ async def list_classifications(
 @router.get("/classifications/{classification_id}", response_model=ClassificationDetail)
 async def get_classification(classification_id: UUID, conn: ConnDep):
     return await _get(conn, CLASSIFICATIONS, classification_id)
+
+
+@router.get("/software-components", response_model=list[SoftwareComponent])
+async def list_software_components(
+    conn: ConnDep,
+    purl: Annotated[str | None, Query(max_length=1000)] = None,
+    after: UUID | None = None,
+    limit: Limit = 100,
+):
+    """``purl`` finds a component by its exact package URL."""
+    filters = [_Filter("purl", purl)]
+    return await _list(conn, SOFTWARE_COMPONENTS, after=after, limit=limit, filters=filters)
+
+
+@router.get("/software-components/{component_id}", response_model=SoftwareComponent)
+async def get_software_component(component_id: UUID, conn: ConnDep):
+    return await _get(conn, SOFTWARE_COMPONENTS, component_id)
+
+
+@router.get("/software-releases", response_model=list[SoftwareRelease])
+async def list_software_releases(
+    conn: ConnDep,
+    component_id: UUID | None = None,
+    source_id: UUID | None = None,
+    after: UUID | None = None,
+    limit: Limit = 100,
+):
+    filters = [_Filter("component_id", component_id), _Filter("source_id", source_id)]
+    return await _list(conn, SOFTWARE_RELEASES, after=after, limit=limit, filters=filters)
+
+
+@router.get("/software-releases/{software_release_id}", response_model=SoftwareRelease)
+async def get_software_release(software_release_id: UUID, conn: ConnDep):
+    return await _get(conn, SOFTWARE_RELEASES, software_release_id)
+
+
+@router.get("/binary-component-assertions", response_model=list[BinaryComponentAssertion])
+async def list_binary_component_assertions(
+    conn: ConnDep,
+    binary_id: UUID | None = None,
+    software_release_id: UUID | None = None,
+    after: UUID | None = None,
+    limit: Limit = 100,
+):
+    filters = [
+        _Filter("binary_id", binary_id),
+        _Filter("software_release_id", software_release_id),
+    ]
+    return await _list(
+        conn, BINARY_COMPONENT_ASSERTIONS, after=after, limit=limit, filters=filters
+    )
+
+
+@router.get(
+    "/binary-component-assertions/{binary_component_assertion_id}",
+    response_model=BinaryComponentAssertion,
+)
+async def get_binary_component_assertion(binary_component_assertion_id: UUID, conn: ConnDep):
+    return await _get(conn, BINARY_COMPONENT_ASSERTIONS, binary_component_assertion_id)
+
+
+_HAS_MEMBER = """EXISTS (
+    SELECT 1 FROM catalogue.composition_member AS m
+     WHERE m.behavioural_composition_id = t.behavioural_composition_id
+       AND m.target_type = %s::catalogue.corpus_target_type AND m.target_id = %s)"""
+
+
+@router.get("/behavioural-compositions", response_model=list[BehaviouralComposition])
+async def list_behavioural_compositions(
+    conn: ConnDep,
+    member_type: MemberType | None = None,
+    member_id: UUID | None = None,
+    after: UUID | None = None,
+    limit: Limit = 100,
+):
+    """``member_type`` with ``member_id`` lists the compositions containing that binary or function."""
+    if (member_type is None) != (member_id is None):
+        raise HTTPException(
+            status_code=422, detail="member_type and member_id are given together or not at all"
+        )
+    extra = (_HAS_MEMBER, (member_type, member_id)) if member_id is not None else None
+    return await _list(conn, BEHAVIOURAL_COMPOSITIONS, after=after, limit=limit, extra=extra)
+
+
+@router.get(
+    "/behavioural-compositions/{behavioural_composition_id}",
+    response_model=BehaviouralCompositionDetail,
+)
+async def get_behavioural_composition(behavioural_composition_id: UUID, conn: ConnDep):
+    return await _get(conn, BEHAVIOURAL_COMPOSITIONS, behavioural_composition_id)
 
 
 @router.get("/flags", response_model=list[Flag])

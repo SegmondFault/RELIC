@@ -109,20 +109,20 @@ compatibility MD5 against the agreed canonical JSON serialization before
 admission. RELIC-specific build recipe fields remain below `unmapped.relic`;
 the API must not silently discard unmapped evidence.
 
-Binary/component claims use the same signed-write rule. Creating a new
-component or release and its `binary_component_assertion` is one transaction;
-the signed canonical claim covers the Binary ID, component/release identity,
-relationship, basis, confidence, optional evidence-provenance ID and analyst
-identity. A component row without an assertion does not establish that a Binary
-contains that software.
+Binary/component claims use the same signed-write rule. Components, releases
+and `binary_component_assertion` rows are each signed by their Analyst and
+written by their own route; the assertion's signature covers the Binary ID,
+release ID, relationship, basis, confidence, optional evidence-provenance ID
+and analyst identity. A component row without an assertion does not establish
+that a Binary contains that software.
 
 Behavioural compositions follow the same signed, atomic admission boundary.
-The API creates the composition, every Binary/Function member, and its signed
-classification in one transaction. The classification applies only to the
-composition: it must not be copied to individual members. Members must precede
-the classification because a classified composition cannot later gain members;
-a changed member set is a new composition followed by ordinary revocation of
-the superseded assertion.
+The composition and every Binary/Function member are signed together and
+written in one transaction; the database refuses members added later, so the
+membership a classification refers to cannot change. The classification
+(`POST /v1/classifications`) applies only to the composition: it must not be
+copied to individual members. A changed member set is a new composition
+followed by ordinary revocation of the superseded one.
 
 ## Atomic admission
 

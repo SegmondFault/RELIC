@@ -253,6 +253,221 @@ fn claim_vectors() -> (Vec<Value>, Vec<Value>) {
     (licenses, classifications)
 }
 
+/// Software components, releases, binary-component assertions and
+/// behavioural compositions (with and without optional fields).
+#[allow(clippy::too_many_lines)]
+fn component_vectors() -> Value {
+    let analyst_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
+    let component_id = [0x51_u8; 16];
+    let release_id = [0x52_u8; 16];
+    let source_id = *b"\x2d\x3e\x4f\x50\x61\x72\x43\x84\x95\xa6\xb7\xc8\xd9\xea\xfb\x0c";
+    let binary_id = *b"\xa1\x37\x5e\x08\xd4\x6c\x41\x9f\x83\x2b\x90\x4e\x17\xf5\x6a\xc2";
+    let function_id = *b"\xc4\x15\x26\x37\x48\x59\x4a\x6b\x8c\x7d\x8e\x9f\xa0\xb1\xc2\xd3";
+    let evidence_id = *b"\x19\x2c\x7d\x4e\x5f\x60\x41\x82\x93\xa4\xb5\xc6\xd7\xe8\xf9\x0a";
+    let seed = [0x55; 32];
+
+    let mut components = Vec::new();
+    for (name, id, namespace, purl) in [
+        (
+            "software-component-full",
+            component_id,
+            Some("openssl.org"),
+            Some("pkg:generic/openssl@3.0.13"),
+        ),
+        ("software-component-minimal", [0x53_u8; 16], None, None),
+    ] {
+        let component = auth::SoftwareComponent {
+            component_id: &id,
+            analyst_id: &analyst_id,
+            name: "OpenSSL Ünïcode",
+            component_kind: "library",
+            namespace,
+            purl,
+        };
+        components.push(signed_case(
+            name,
+            seed,
+            &auth::software_component_record(&component),
+            auth::SOFTWARE_COMPONENT_SIGNATURE_DOMAIN,
+            json!({
+                "component_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "name": component.name,
+                "component_kind": component.component_kind,
+                "namespace": namespace,
+                "purl": purl,
+            }),
+        ));
+    }
+
+    let mut releases = Vec::new();
+    for (name, id, version, source) in [
+        (
+            "software-release-full",
+            release_id,
+            Some("3.0.13"),
+            Some(&source_id),
+        ),
+        ("software-release-minimal", [0x54_u8; 16], None, None),
+    ] {
+        let release = auth::SoftwareRelease {
+            software_release_id: &id,
+            analyst_id: &analyst_id,
+            component_id: &component_id,
+            version,
+            source_id: source,
+        };
+        releases.push(signed_case(
+            name,
+            seed,
+            &auth::software_release_record(&release),
+            auth::SOFTWARE_RELEASE_SIGNATURE_DOMAIN,
+            json!({
+                "software_release_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "component_id": hex(&component_id),
+                "version": version,
+                "source_id": source.map(|id| hex(id)),
+            }),
+        ));
+    }
+
+    let mut assertions = Vec::new();
+    for (name, id, confidence, evidence) in [
+        (
+            "binary-component-assertion-full",
+            [0x56_u8; 16],
+            Some("0.7500"),
+            Some(&evidence_id),
+        ),
+        (
+            "binary-component-assertion-minimal",
+            [0x57_u8; 16],
+            None,
+            None,
+        ),
+    ] {
+        let assertion = auth::BinaryComponentAssertion {
+            binary_component_assertion_id: &id,
+            analyst_id: &analyst_id,
+            binary_id: &binary_id,
+            software_release_id: &release_id,
+            relationship: "statically_contains",
+            basis: "detected",
+            confidence,
+            evidence_provenance_id: evidence,
+        };
+        assertions.push(signed_case(
+            name,
+            seed,
+            &auth::binary_component_assertion_record(&assertion),
+            auth::BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN,
+            json!({
+                "binary_component_assertion_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "binary_id": hex(&binary_id),
+                "software_release_id": hex(&release_id),
+                "relationship": assertion.relationship,
+                "basis": assertion.basis,
+                "confidence": confidence,
+                "evidence_provenance_id": evidence.map(|id| hex(id)),
+            }),
+        ));
+    }
+
+    // Listed out of canonical order on purpose: the record sorts members.
+    let members = [
+        auth::CompositionMember {
+            target_type: "function",
+            target_id: &function_id,
+            member_role: "decryptor",
+            sequence_number: Some(2),
+        },
+        auth::CompositionMember {
+            target_type: "binary",
+            target_id: &binary_id,
+            member_role: "loader",
+            sequence_number: Some(1),
+        },
+        auth::CompositionMember {
+            target_type: "binary",
+            target_id: &binary_id,
+            member_role: "persistence",
+            sequence_number: None,
+        },
+    ];
+    let members_json = |members: &[auth::CompositionMember<'_>]| -> Value {
+        members
+            .iter()
+            .map(|member| {
+                json!({
+                    "target_type": member.target_type,
+                    "target_id": hex(member.target_id),
+                    "member_role": member.member_role,
+                    "sequence_number": member.sequence_number,
+                })
+            })
+            .collect()
+    };
+    let mut compositions = Vec::new();
+    for (name, id, description, evidence, members) in [
+        (
+            "behavioural-composition-full",
+            [0x58_u8; 16],
+            Some("Loader drops and decrypts a payload"),
+            Some(&evidence_id),
+            &members[..],
+        ),
+        (
+            "behavioural-composition-minimal",
+            [0x59_u8; 16],
+            None,
+            None,
+            &members[1..2],
+        ),
+    ] {
+        let composition = auth::BehaviouralComposition {
+            behavioural_composition_id: &id,
+            analyst_id: &analyst_id,
+            name: "Staged loader",
+            description,
+            evidence_provenance_id: evidence,
+            members,
+        };
+        let mut reversed = members.to_vec();
+        reversed.reverse();
+        assert_eq!(
+            auth::behavioural_composition_record(&composition),
+            auth::behavioural_composition_record(&auth::BehaviouralComposition {
+                members: &reversed,
+                ..composition
+            }),
+            "member order must not change the record"
+        );
+        compositions.push(signed_case(
+            name,
+            seed,
+            &auth::behavioural_composition_record(&composition),
+            auth::BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN,
+            json!({
+                "behavioural_composition_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "name": composition.name,
+                "description": description,
+                "evidence_provenance_id": evidence.map(|id| hex(id)),
+                "members": members_json(members),
+            }),
+        ));
+    }
+
+    json!({
+        "software_component": components,
+        "software_release": releases,
+        "binary_component_assertion": assertions,
+        "behavioural_composition": compositions,
+    })
+}
+
 /// Registration proofs, with and without an organisation.
 fn registration_vectors(challenge: &auth::AuthChallenge) -> Vec<Value> {
     let mut registrations = Vec::new();
@@ -364,6 +579,7 @@ fn build_vectors() -> Value {
         "format": "relic-auth-vectors/1",
         "license_assertion": license_assertions,
         "classification": classifications,
+        "components": component_vectors(),
         "flag": flags,
         "flag_response": flag_responses,
         "registration_decision": decisions,

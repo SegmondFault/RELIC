@@ -1,6 +1,7 @@
 //! Canonical signed user messages: login, registration proof-of-possession,
 //! registration decisions, revocation requests and decisions, flags and flag
-//! responses, licence assertions and classifications.
+//! responses, licence assertions, classifications, software components and
+//! releases, binary-component assertions and behavioural compositions.
 //!
 //! Login and registration proofs are signed over a single-use server
 //! challenge. Decisions, revocation requests, flags and flag responses are
@@ -51,6 +52,26 @@ pub const LICENSE_ASSERTION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:license-assertion-
 pub const CLASSIFICATION_RECORD_DOMAIN: &[u8] = b"RELIC:classification:v1";
 /// Signature domain for an Analyst's classification.
 pub const CLASSIFICATION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:classification-signature:v1";
+/// Record domain for a software component identity.
+pub const SOFTWARE_COMPONENT_RECORD_DOMAIN: &[u8] = b"RELIC:software-component:v1";
+/// Signature domain for a software component identity.
+pub const SOFTWARE_COMPONENT_SIGNATURE_DOMAIN: &[u8] = b"RELIC:software-component-signature:v1";
+/// Record domain for a software release identity.
+pub const SOFTWARE_RELEASE_RECORD_DOMAIN: &[u8] = b"RELIC:software-release:v1";
+/// Signature domain for a software release identity.
+pub const SOFTWARE_RELEASE_SIGNATURE_DOMAIN: &[u8] = b"RELIC:software-release-signature:v1";
+/// Record domain for a binary-component assertion.
+pub const BINARY_COMPONENT_ASSERTION_RECORD_DOMAIN: &[u8] = b"RELIC:binary-component-assertion:v1";
+/// Signature domain for a binary-component assertion.
+pub const BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN: &[u8] =
+    b"RELIC:binary-component-assertion-signature:v1";
+/// Record domain for a behavioural composition, members included.
+pub const BEHAVIOURAL_COMPOSITION_RECORD_DOMAIN: &[u8] = b"RELIC:behavioural-composition:v1";
+/// Signature domain for a behavioural composition.
+pub const BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN: &[u8] =
+    b"RELIC:behavioural-composition-signature:v1";
+/// Domain of one member's encoding inside a composition record (never signed alone).
+pub const COMPOSITION_MEMBER_DOMAIN: &[u8] = b"RELIC:composition-member:v1";
 
 /// A Moderator's verdict on a pending registration or revocation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -465,4 +486,193 @@ pub fn classification_record(classification: &Classification<'_>) -> Vec<u8> {
 #[must_use]
 pub fn classification_digest(classification: &Classification<'_>) -> Digest32 {
     sha256(&classification_record(classification))
+}
+
+/// An Analyst's normalised software identity (a library, application, runtime...).
+///
+/// It is not itself a claim that any binary contains the component.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SoftwareComponent<'a> {
+    pub component_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    pub name: &'a str,
+    pub component_kind: &'a str,
+    pub namespace: Option<&'a str>,
+    /// A package URL, exactly as submitted.
+    pub purl: Option<&'a str>,
+}
+
+/// Canonical bytes of a software component.
+#[must_use]
+pub fn software_component_record(component: &SoftwareComponent<'_>) -> Vec<u8> {
+    encode_fields(
+        SOFTWARE_COMPONENT_RECORD_DOMAIN,
+        &[
+            component.component_id,
+            component.analyst_id,
+            component.name.as_bytes(),
+            component.component_kind.as_bytes(),
+            &encode_optional(component.namespace),
+            &encode_optional(component.purl),
+        ],
+    )
+}
+
+/// Digest signed under [`SOFTWARE_COMPONENT_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn software_component_digest(component: &SoftwareComponent<'_>) -> Digest32 {
+    sha256(&software_component_record(component))
+}
+
+/// A release (version) of a software component; version and source may be unknown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SoftwareRelease<'a> {
+    pub software_release_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    pub component_id: &'a [u8; 16],
+    pub version: Option<&'a str>,
+    pub source_id: Option<&'a [u8; 16]>,
+}
+
+/// Canonical bytes of a software release.
+#[must_use]
+pub fn software_release_record(release: &SoftwareRelease<'_>) -> Vec<u8> {
+    encode_fields(
+        SOFTWARE_RELEASE_RECORD_DOMAIN,
+        &[
+            release.software_release_id,
+            release.analyst_id,
+            release.component_id,
+            &encode_optional(release.version),
+            &encode_optional_bytes(release.source_id.map(|id| &id[..])),
+        ],
+    )
+}
+
+/// Digest signed under [`SOFTWARE_RELEASE_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn software_release_digest(release: &SoftwareRelease<'_>) -> Digest32 {
+    sha256(&software_release_record(release))
+}
+
+/// An Analyst's claim that a binary relates to a software release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BinaryComponentAssertion<'a> {
+    pub binary_component_assertion_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    pub binary_id: &'a [u8; 16],
+    pub software_release_id: &'a [u8; 16],
+    /// `build_of`, `statically_contains`, `dynamically_links`, `derived_from` or `other`.
+    pub relationship: &'a str,
+    /// `declared`, `detected`, `inferred` or `analyst_assessed`.
+    pub basis: &'a str,
+    /// Exactly four decimals between `0.0000` and `1.0000`, as stored.
+    pub confidence: Option<&'a str>,
+    pub evidence_provenance_id: Option<&'a [u8; 16]>,
+}
+
+/// Canonical bytes of a binary-component assertion.
+#[must_use]
+pub fn binary_component_assertion_record(assertion: &BinaryComponentAssertion<'_>) -> Vec<u8> {
+    encode_fields(
+        BINARY_COMPONENT_ASSERTION_RECORD_DOMAIN,
+        &[
+            assertion.binary_component_assertion_id,
+            assertion.analyst_id,
+            assertion.binary_id,
+            assertion.software_release_id,
+            assertion.relationship.as_bytes(),
+            assertion.basis.as_bytes(),
+            &encode_optional(assertion.confidence),
+            &encode_optional_bytes(assertion.evidence_provenance_id.map(|id| &id[..])),
+        ],
+    )
+}
+
+/// Digest signed under [`BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn binary_component_assertion_digest(assertion: &BinaryComponentAssertion<'_>) -> Digest32 {
+    sha256(&binary_component_assertion_record(assertion))
+}
+
+/// One member of a behavioural composition: an exact binary or function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompositionMember<'a> {
+    /// `binary` or `function`.
+    pub target_type: &'a str,
+    pub target_id: &'a [u8; 16],
+    pub member_role: &'a str,
+    /// Position in the sequence, or `None` when no order is asserted.
+    pub sequence_number: Option<u32>,
+}
+
+/// Canonical bytes of one member (a part of the composition record).
+#[must_use]
+pub fn composition_member_record(member: &CompositionMember<'_>) -> Vec<u8> {
+    let sequence = member.sequence_number.map(u32::to_be_bytes);
+    encode_fields(
+        COMPOSITION_MEMBER_DOMAIN,
+        &[
+            member.target_type.as_bytes(),
+            member.target_id,
+            member.member_role.as_bytes(),
+            &encode_optional_bytes(sequence.as_ref().map(|bytes| &bytes[..])),
+        ],
+    )
+}
+
+/// An Analyst-defined set or sequence of binaries and functions whose combined
+/// behaviour can be classified. The signature covers every member, so the
+/// membership cannot change after signing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BehaviouralComposition<'a> {
+    pub behavioural_composition_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub evidence_provenance_id: Option<&'a [u8; 16]>,
+    /// In any order: the record sorts them.
+    pub members: &'a [CompositionMember<'a>],
+}
+
+/// Canonical bytes of a behavioural composition.
+///
+/// The members field is each member's [`composition_member_record`], sorted
+/// bytewise and each prefixed with its length as a big-endian `u64`, so the
+/// record does not depend on the order in which members were listed.
+///
+/// # Panics
+///
+/// Only if a member's length does not fit in a `u64`, which cannot happen.
+#[must_use]
+pub fn behavioural_composition_record(composition: &BehaviouralComposition<'_>) -> Vec<u8> {
+    let mut members: Vec<Vec<u8>> = composition
+        .members
+        .iter()
+        .map(composition_member_record)
+        .collect();
+    members.sort();
+    let mut encoded_members = Vec::new();
+    for member in &members {
+        let length = u64::try_from(member.len()).expect("member length exceeds u64");
+        encoded_members.extend_from_slice(&length.to_be_bytes());
+        encoded_members.extend_from_slice(member);
+    }
+    encode_fields(
+        BEHAVIOURAL_COMPOSITION_RECORD_DOMAIN,
+        &[
+            composition.behavioural_composition_id,
+            composition.analyst_id,
+            composition.name.as_bytes(),
+            &encode_optional(composition.description),
+            &encode_optional_bytes(composition.evidence_provenance_id.map(|id| &id[..])),
+            &encoded_members,
+        ],
+    )
+}
+
+/// Digest signed under [`BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn behavioural_composition_digest(composition: &BehaviouralComposition<'_>) -> Digest32 {
+    sha256(&behavioural_composition_record(composition))
 }

@@ -317,16 +317,17 @@ BEGIN
     );
 
     INSERT INTO software_component (
-        component_id, name, component_kind, purl, created_by_analyst_id
+        component_id, name, component_kind, purl, created_by_analyst_id, signature
     ) VALUES (
         component_id_value, 'libexample', 'library',
-        'pkg:generic/libexample@1.0', analyst_id
+        'pkg:generic/libexample@1.0', analyst_id, decode(repeat('47', 64), 'hex')
     );
     INSERT INTO software_release (
         software_release_id, component_id, version, source_id,
-        created_by_analyst_id
+        created_by_analyst_id, signature
     ) VALUES (
-        release_id_value, component_id_value, '1.0', source_id_value, analyst_id
+        release_id_value, component_id_value, '1.0', source_id_value, analyst_id,
+        decode(repeat('48', 64), 'hex')
     );
     INSERT INTO binary_component_assertion (
         binary_component_assertion_id, binary_id, software_release_id,
@@ -413,11 +414,11 @@ BEGIN
 
     INSERT INTO behavioural_composition (
         behavioural_composition_id, name, description,
-        submitted_by_analyst_id, signature
+        submitted_by_analyst_id, signature, member_count
     ) VALUES (
         composition_id_value, 'staged execution chain',
         'Neutral members whose ordered combination is classified separately',
-        analyst_id, decode(repeat('54', 64), 'hex')
+        analyst_id, decode(repeat('54', 64), 'hex'), 2
     );
     INSERT INTO composition_member (
         behavioural_composition_id, target_type, target_id,

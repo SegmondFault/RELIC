@@ -191,6 +191,82 @@ def test_classification_vectors(case):
     _check_signed_case(case, record, crypto.CLASSIFICATION_SIGNATURE_DOMAIN)
 
 
+def _id(value: str | None) -> uuid.UUID | None:
+    return None if value is None else uuid.UUID(hex=value)
+
+
+COMPONENTS = VECTORS["components"]
+
+
+@pytest.mark.parametrize("case", COMPONENTS["software_component"], ids=lambda case: case["name"])
+def test_software_component_vectors(case):
+    i = case["inputs"]
+    record = crypto.software_component_record(
+        crypto.SoftwareComponent(
+            component_id=_id(i["component_id"]), analyst_id=_id(i["analyst_id"]),
+            name=i["name"], component_kind=i["component_kind"],
+            namespace=i["namespace"], purl=i["purl"],
+        )
+    )
+    _check_signed_case(case, record, crypto.SOFTWARE_COMPONENT_SIGNATURE_DOMAIN)
+
+
+@pytest.mark.parametrize("case", COMPONENTS["software_release"], ids=lambda case: case["name"])
+def test_software_release_vectors(case):
+    i = case["inputs"]
+    record = crypto.software_release_record(
+        crypto.SoftwareRelease(
+            software_release_id=_id(i["software_release_id"]), analyst_id=_id(i["analyst_id"]),
+            component_id=_id(i["component_id"]), version=i["version"],
+            source_id=_id(i["source_id"]),
+        )
+    )
+    _check_signed_case(case, record, crypto.SOFTWARE_RELEASE_SIGNATURE_DOMAIN)
+
+
+@pytest.mark.parametrize(
+    "case", COMPONENTS["binary_component_assertion"], ids=lambda case: case["name"]
+)
+def test_binary_component_assertion_vectors(case):
+    i = case["inputs"]
+    record = crypto.binary_component_assertion_record(
+        crypto.BinaryComponentAssertion(
+            binary_component_assertion_id=_id(i["binary_component_assertion_id"]),
+            analyst_id=_id(i["analyst_id"]), binary_id=_id(i["binary_id"]),
+            software_release_id=_id(i["software_release_id"]),
+            relationship=i["relationship"], basis=i["basis"], confidence=i["confidence"],
+            evidence_provenance_id=_id(i["evidence_provenance_id"]),
+        )
+    )
+    _check_signed_case(case, record, crypto.BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN)
+
+
+@pytest.mark.parametrize(
+    "case", COMPONENTS["behavioural_composition"], ids=lambda case: case["name"]
+)
+def test_behavioural_composition_vectors(case):
+    i = case["inputs"]
+    members = tuple(
+        crypto.CompositionMember(
+            target_type=m["target_type"], target_id=_id(m["target_id"]),
+            member_role=m["member_role"], sequence_number=m["sequence_number"],
+        )
+        for m in i["members"]
+    )
+
+    def record(order):
+        return crypto.behavioural_composition_record(
+            crypto.BehaviouralComposition(
+                behavioural_composition_id=_id(i["behavioural_composition_id"]),
+                analyst_id=_id(i["analyst_id"]), name=i["name"], description=i["description"],
+                evidence_provenance_id=_id(i["evidence_provenance_id"]), members=order,
+            )
+        )
+
+    _check_signed_case(case, record(members), crypto.BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN)
+    assert record(members[::-1]) == record(members)
+
+
 def test_small_order_public_key_is_rejected():
     # The identity point: any "signature" with R = identity and S = 0 would
     # verify under a non-strict verifier.

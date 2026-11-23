@@ -228,6 +228,61 @@ to the parsed `evidence` and must parse to the same value; reads return both.
 `misp_universe` and `misp_uuid` come together. Classifications are immutable
 and refused on revoked targets, like licence assertions.
 
+### Software component
+
+- `D = RELIC:software-component:v1`, `S = RELIC:software-component-signature:v1`
+- fields: `component_id`, `analyst_id`, `name`, `component_kind`, then the
+  optional `namespace` and `purl`
+- `POST /v1/software-components` with those values plus `signature`
+
+A component names software; it claims nothing about any binary. `purl` must
+be a package URL (`pkg:type/...`) and is signed exactly as given.
+
+### Software release
+
+- `D = RELIC:software-release:v1`, `S = RELIC:software-release-signature:v1`
+- fields: `software_release_id`, `analyst_id`, `component_id`, then the
+  optional `version` and `source_id` (`0x00`, or `0x01` and 16 bytes)
+- `POST /v1/software-releases` with those values plus `signature`
+
+Refused (`409`) when the component or source is revoked.
+
+### Binary-component assertion
+
+- `D = RELIC:binary-component-assertion:v1`,
+  `S = RELIC:binary-component-assertion-signature:v1`
+- fields: `binary_component_assertion_id`, `analyst_id`, `binary_id`,
+  `software_release_id`, `relationship` (`build_of`, `statically_contains`,
+  `dynamically_links`, `derived_from`, `other`), `basis` (as for licences),
+  then the optional `confidence` (four decimals) and `evidence_provenance_id`
+- `POST /v1/binary-component-assertions` with those values plus `signature`
+
+Refused (`409`) when the binary, the release or the release's component is
+revoked.
+
+### Behavioural composition
+
+- `D = RELIC:behavioural-composition:v1`,
+  `S = RELIC:behavioural-composition-signature:v1`
+- fields: `behavioural_composition_id`, `analyst_id`, `name`, the optional
+  `description` and `evidence_provenance_id`, then `members`
+- each member is encoded on its own as
+  `encode_fields("RELIC:composition-member:v1", [target_type, target_id,
+  member_role, sequence_number])`, where `target_type` is `binary` or
+  `function` and `sequence_number` is optional (`0x00`, or `0x01` and a
+  big-endian `u32`)
+- the `members` field is those encodings **sorted bytewise**, each prefixed
+  with its length as a big-endian `u64`, so the order in which members are
+  listed does not change the signature
+- `POST /v1/behavioural-compositions` with those values, the members as a
+  list, and `signature`
+
+1 to 500 distinct members. The composition and its members are written in
+one transaction and the database refuses a member added later (the row
+states its `member_count`, checked when the transaction commits), so the
+stored membership is always the signed one. Refused (`409`) when a member is
+revoked.
+
 ## Client
 
 Generate a key used only for RELIC, and build the signer:
@@ -300,9 +355,8 @@ signature with the requester's registered key (`--requester`, from
 (`--target`, from the target's read route, e.g. `/v1/users/{id}` or
 `/v1/fidbf/{id}`) on stderr. It refuses to sign if the signature does not
 verify, either file belongs to someone else, the target is not given, or the
-request is no longer pending. `--target` may be omitted only for types without
-a read route yet (software components and releases, binary-component
-assertions, behavioural compositions).
+request is no longer pending. Every target type has a read route, so
+`--target` is always required.
 
 ```bash
 curl -s -H "authorization: Bearer $TOKEN" "https://$HOST/v1/revocations?status=pending"
@@ -362,3 +416,32 @@ target/release/relic-sign-challenge classify --analyst-id "$ANALYST_ID" \
 curl -s -X POST https://$HOST/v1/classifications \
      -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @classification.json
 ```
+
+**Software components, releases, component assertions and compositions**
+(Analyst). Resending a printed body is a safe retry. `compose` reads its
+members from a JSON file and prints them on stderr before signing:
+
+```bash
+target/release/relic-sign-challenge create-component --analyst-id "$ANALYST_ID" \
+     --name zlib --kind library --purl pkg:generic/zlib \
+     --key ~/.ssh/relic_ed25519 > component.json
+target/release/relic-sign-challenge create-release --analyst-id "$ANALYST_ID" \
+     --component-id "$(jq -r .component_id component.json)" --version 1.3.1 \
+     --key ~/.ssh/relic_ed25519 > release.json
+target/release/relic-sign-challenge assert-component --analyst-id "$ANALYST_ID" \
+     --binary-id "$BINARY_ID" --software-release-id "$(jq -r .software_release_id release.json)" \
+     --relationship statically_contains --basis detected --confidence 0.9000 \
+     --key ~/.ssh/relic_ed25519 > assertion.json
+
+cat > members.json <<'JSON'
+[{"target_type": "binary",   "target_id": "<binary id>",   "member_role": "loader",  "sequence_number": 0},
+ {"target_type": "function", "target_id": "<function id>", "member_role": "payload", "sequence_number": 1}]
+JSON
+target/release/relic-sign-challenge compose --analyst-id "$ANALYST_ID" \
+     --name "Staged loader" --members members.json \
+     --key ~/.ssh/relic_ed25519 > composition.json
+```
+
+POST them, in that order, to `/v1/software-components`,
+`/v1/software-releases`, `/v1/binary-component-assertions` and
+`/v1/behavioural-compositions`, as above.

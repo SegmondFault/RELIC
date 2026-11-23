@@ -559,3 +559,156 @@ class ClassificationSubmission(_Request):
         if (self.misp_universe is None) != (self.misp_uuid is None):
             raise ValueError("misp_universe and misp_uuid are given together or not at all")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Software components, releases, component assertions, compositions
+# ---------------------------------------------------------------------------
+
+_PURL = re.compile(r"pkg:[a-z][a-z0-9.+-]*/\S+")
+
+
+def _purl(value: str) -> str:
+    if not _PURL.fullmatch(value):
+        raise ValueError("must be a package URL (pkg:<type>/<name>...)")
+    return value
+
+
+Purl = Annotated[
+    str, Field(min_length=7, max_length=1000), AfterValidator(_clean_text), AfterValidator(_purl)
+]
+ShortText = Annotated[str, Field(min_length=1, max_length=64), AfterValidator(_clean_text)]
+Description = Annotated[str, Field(min_length=1, max_length=4000), AfterValidator(_clean_text)]
+ComponentBasis = Literal["declared", "detected", "inferred", "analyst_assessed"]
+ComponentRelationship = Literal[
+    "build_of", "statically_contains", "dynamically_links", "derived_from", "other"
+]
+MemberType = Literal["binary", "function"]
+MAX_COMPOSITION_MEMBERS = 500
+
+
+class SoftwareComponentSubmission(_Request):
+    component_id: UUID = Field(description="Chosen by the Analyst; makes the row single-use")
+    analyst_id: UUID = Field(description="The creating Analyst: must be the caller")
+    name: DisplayText
+    component_kind: ShortText = Field(description="e.g. library, application, runtime")
+    namespace: DisplayText | None = None
+    purl: Purl | None = None
+    signature: HexSignature
+
+
+class SoftwareComponent(BaseModel):
+    component_id: UUID
+    name: str
+    component_kind: str
+    namespace: str | None
+    purl: str | None
+    created_at: datetime
+    created_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class SoftwareReleaseSubmission(_Request):
+    software_release_id: UUID = Field(description="Chosen by the Analyst; makes the row single-use")
+    analyst_id: UUID = Field(description="The creating Analyst: must be the caller")
+    component_id: UUID
+    version: DisplayText | None = Field(None, description="Omit when genuinely unknown")
+    source_id: UUID | None = None
+    signature: HexSignature
+
+
+class SoftwareRelease(BaseModel):
+    software_release_id: UUID
+    component_id: UUID
+    version: str | None
+    source_id: UUID | None
+    created_at: datetime
+    created_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class BinaryComponentAssertionSubmission(_Request):
+    binary_component_assertion_id: UUID = Field(
+        description="Chosen by the Analyst; makes the claim single-use"
+    )
+    analyst_id: UUID = Field(description="The asserting Analyst: must be the caller")
+    binary_id: UUID
+    software_release_id: UUID
+    relationship: ComponentRelationship
+    basis: ComponentBasis
+    confidence: Confidence | None = None
+    evidence_provenance_id: UUID | None = None
+    signature: HexSignature
+
+
+class BinaryComponentAssertion(BaseModel):
+    binary_component_assertion_id: UUID
+    binary_id: UUID
+    software_release_id: UUID
+    relationship: ComponentRelationship
+    basis: ComponentBasis
+    confidence: DecimalText | None
+    evidence_provenance_id: UUID | None
+    created_at: datetime
+    submitted_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class CompositionMemberIn(_Request):
+    target_type: MemberType
+    target_id: UUID
+    member_role: ShortText
+    sequence_number: int | None = Field(None, ge=0, le=2**31 - 1)
+
+
+class BehaviouralCompositionSubmission(_Request):
+    behavioural_composition_id: UUID = Field(
+        description="Chosen by the Analyst; makes the composition single-use"
+    )
+    analyst_id: UUID = Field(description="The composing Analyst: must be the caller")
+    name: DisplayText
+    description: Description | None = None
+    evidence_provenance_id: UUID | None = None
+    members: list[CompositionMemberIn] = Field(
+        min_length=1,
+        max_length=MAX_COMPOSITION_MEMBERS,
+        description="Signed together with the composition, in any order",
+    )
+    signature: HexSignature
+
+    @model_validator(mode="after")
+    def _distinct_members(self) -> "BehaviouralCompositionSubmission":
+        keys = [
+            (m.target_type, m.target_id, m.member_role, m.sequence_number) for m in self.members
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("members must be distinct")
+        return self
+
+
+class CompositionMember(BaseModel):
+    target_type: MemberType
+    target_id: UUID
+    member_role: str
+    sequence_number: int | None
+
+
+class BehaviouralComposition(BaseModel):
+    behavioural_composition_id: UUID
+    name: str
+    description: str | None
+    evidence_provenance_id: UUID | None
+    member_count: int
+    created_at: datetime
+    submitted_by_analyst_id: UUID
+    signature: Signature
+    revoked: bool
+
+
+class BehaviouralCompositionDetail(BehaviouralComposition):
+    members: list[CompositionMember] = Field(
+        description="Ordered by sequence number (unordered members last), then target"
+    )

@@ -4,9 +4,11 @@
 //! `POST /v1/auth/challenge`; `decide-registration` and `decide-revocation`
 //! read a request exactly as returned by `GET /v1/registrations/{id}` and
 //! `GET /v1/revocations/{id}`, and `respond-flag` reads a flag as returned by
-//! `GET /v1/flags/{id}`; `request-revocation`, `flag`, `assert-license` and
-//! `classify` take their fields as arguments. Each signs the canonical message with the user's OpenSSH Ed25519
-//! key and prints the JSON body to POST.
+//! `GET /v1/flags/{id}`; `request-revocation`, `flag`, `assert-license`,
+//! `classify`, `create-component`, `create-release` and `assert-component`
+//! take their fields as arguments, and `compose` reads its members from a JSON
+//! file. Each signs the canonical message with the user's OpenSSH Ed25519 key
+//! and prints the JSON body to POST.
 
 use std::{
     fs,
@@ -98,7 +100,7 @@ enum Command {
         #[arg(long)]
         requester: PathBuf,
         /// The target, as returned by its read route (e.g. `GET /v1/users/{id}`,
-        /// `GET /v1/fidbf/{id}`). Required unless its type has no read route.
+        /// `GET /v1/fidbf/{id}`).
         #[arg(long)]
         target: Option<PathBuf>,
         /// The deciding Moderator's own User ID.
@@ -130,6 +132,14 @@ enum Command {
     AssertLicense(LicenseArgs),
     /// Sign an Analyst's classification of a binary, function or composition.
     Classify(ClassifyArgs),
+    /// Sign an Analyst's software component (library, application, runtime...).
+    CreateComponent(ComponentArgs),
+    /// Sign an Analyst's release of a software component.
+    CreateRelease(ReleaseArgs),
+    /// Sign an Analyst's claim relating a binary to a software release.
+    AssertComponent(ComponentAssertionArgs),
+    /// Sign an Analyst's behavioural composition, all members included.
+    Compose(ComposeArgs),
     /// Sign an Analyst's response to a flag.
     RespondFlag {
         /// Flag JSON returned by `GET /v1/flags/{id}`.
@@ -221,6 +231,107 @@ struct ClassifyArgs {
     classification_id: Option<Uuid>,
     #[command(flatten)]
     key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ComponentArgs {
+    /// The creating Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    name: String,
+    /// e.g. library, application, runtime.
+    #[arg(long)]
+    kind: String,
+    #[arg(long)]
+    namespace: Option<String>,
+    /// Package URL, e.g. pkg:generic/openssl; signed exactly as given.
+    #[arg(long)]
+    purl: Option<String>,
+    /// Component ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    component_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ReleaseArgs {
+    /// The creating Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    component_id: Uuid,
+    /// Omit when genuinely unknown.
+    #[arg(long)]
+    version: Option<String>,
+    #[arg(long)]
+    source_id: Option<Uuid>,
+    /// Release ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    software_release_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ComponentAssertionArgs {
+    /// The asserting Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    binary_id: Uuid,
+    #[arg(long)]
+    software_release_id: Uuid,
+    #[arg(long, value_parser = [
+        "build_of", "statically_contains", "dynamically_links", "derived_from", "other",
+    ])]
+    relationship: String,
+    #[arg(long, value_parser = ["declared", "detected", "inferred", "analyst_assessed"])]
+    basis: String,
+    /// Exactly four decimals, 0.0000 to 1.0000.
+    #[arg(long, value_parser = parse_confidence)]
+    confidence: Option<String>,
+    #[arg(long)]
+    evidence_provenance_id: Option<Uuid>,
+    /// Assertion ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    binary_component_assertion_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ComposeArgs {
+    /// The composing Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    evidence_provenance_id: Option<Uuid>,
+    /// JSON array of members: `{"target_type": "binary" | "function",
+    /// "target_id": ..., "member_role": ..., "sequence_number": n | null}`.
+    #[arg(long)]
+    members: PathBuf,
+    /// Composition ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    behavioural_composition_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+/// One member in the `--members` file.
+#[derive(Debug, Deserialize, serde::Serialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+struct MemberEntry {
+    target_type: String,
+    target_id: Uuid,
+    member_role: String,
+    #[serde(default)]
+    sequence_number: Option<u32>,
 }
 
 /// `0.0000` to `1.0000` with exactly four decimals: the form the database
@@ -320,14 +431,6 @@ struct UserFile {
     revoked: bool,
 }
 
-/// Target types without a read route, whose details cannot be shown yet.
-const UNREADABLE_TARGET_TYPES: [&str; 4] = [
-    "software_component",
-    "software_release",
-    "binary_component_assertion",
-    "behavioural_composition",
-];
-
 #[derive(Debug, Deserialize)]
 struct FlagFile {
     flag_id: Uuid,
@@ -356,6 +459,8 @@ fn main() -> ExitCode {
     }
 }
 
+// One flat match arm per subcommand; splitting it would only scatter the dispatch.
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let body = match Arguments::parse().command {
         Command::Login { common } => login(&common)?,
@@ -441,6 +546,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         Command::AssertLicense(args) => assert_license(&args)?,
         Command::Classify(args) => classify(&args)?,
+        Command::CreateComponent(args) => create_component(&args)?,
+        Command::CreateRelease(args) => create_release(&args)?,
+        Command::AssertComponent(args) => assert_component(&args)?,
+        Command::Compose(args) => compose(&args)?,
         Command::RespondFlag {
             flag,
             analyst_id,
@@ -639,12 +748,6 @@ fn describe_target(
     target: Option<&Path>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let Some(path) = target else {
-        if UNREADABLE_TARGET_TYPES.contains(&file.target_type.as_str()) {
-            return Ok(format!(
-                "(no read route for {} yet; details not shown)",
-                file.target_type
-            ));
-        }
         return Err(format!(
             "pass --target with the {} as returned by its read route",
             file.target_type
@@ -652,7 +755,10 @@ fn describe_target(
         .into());
     };
     let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-    let id_field = format!("{}_id", file.target_type);
+    let id_field = match file.target_type.as_str() {
+        "software_component" => "component_id".to_owned(),
+        other => format!("{other}_id"),
+    };
     let target_id = file.target_id.to_string();
     if value.get(&id_field).and_then(serde_json::Value::as_str) != Some(target_id.as_str()) {
         return Err(format!("target file is not {} {target_id}", file.target_type).into());
@@ -800,6 +906,173 @@ fn classify(args: &ClassifyArgs) -> Result<serde_json::Value, Box<dyn std::error
         "misp_universe": args.misp_universe,
         "misp_uuid": args.misp_uuid,
         "evidence_json": evidence,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/software-components`.
+fn create_component(args: &ComponentArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args.component_id.unwrap_or_else(Uuid::new_v4);
+    let component = auth::SoftwareComponent {
+        component_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        name: &args.name,
+        component_kind: &args.kind,
+        namespace: args.namespace.as_deref(),
+        purl: args.purl.as_deref(),
+    };
+    eprintln!(
+        "Signing: software component {id}: {:?} ({}), purl {:?}",
+        args.name, args.kind, args.purl
+    );
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::SOFTWARE_COMPONENT_SIGNATURE_DOMAIN,
+        &auth::software_component_digest(&component),
+    );
+    Ok(json!({
+        "component_id": id,
+        "analyst_id": args.analyst_id,
+        "name": args.name,
+        "component_kind": args.kind,
+        "namespace": args.namespace,
+        "purl": args.purl,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/software-releases`.
+fn create_release(args: &ReleaseArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args.software_release_id.unwrap_or_else(Uuid::new_v4);
+    let release = auth::SoftwareRelease {
+        software_release_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        component_id: args.component_id.as_bytes(),
+        version: args.version.as_deref(),
+        source_id: args.source_id.as_ref().map(Uuid::as_bytes),
+    };
+    eprintln!(
+        "Signing: software release {id}: component {} version {:?}",
+        args.component_id, args.version
+    );
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::SOFTWARE_RELEASE_SIGNATURE_DOMAIN,
+        &auth::software_release_digest(&release),
+    );
+    Ok(json!({
+        "software_release_id": id,
+        "analyst_id": args.analyst_id,
+        "component_id": args.component_id,
+        "version": args.version,
+        "source_id": args.source_id,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/binary-component-assertions`.
+fn assert_component(
+    args: &ComponentAssertionArgs,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args
+        .binary_component_assertion_id
+        .unwrap_or_else(Uuid::new_v4);
+    let evidence = args.evidence_provenance_id;
+    let assertion = auth::BinaryComponentAssertion {
+        binary_component_assertion_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        binary_id: args.binary_id.as_bytes(),
+        software_release_id: args.software_release_id.as_bytes(),
+        relationship: &args.relationship,
+        basis: &args.basis,
+        confidence: args.confidence.as_deref(),
+        evidence_provenance_id: evidence.as_ref().map(Uuid::as_bytes),
+    };
+    eprintln!(
+        "Signing: binary-component assertion {id}: binary {} {} release {} ({})",
+        args.binary_id, args.relationship, args.software_release_id, args.basis
+    );
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::BINARY_COMPONENT_ASSERTION_SIGNATURE_DOMAIN,
+        &auth::binary_component_assertion_digest(&assertion),
+    );
+    Ok(json!({
+        "binary_component_assertion_id": id,
+        "analyst_id": args.analyst_id,
+        "binary_id": args.binary_id,
+        "software_release_id": args.software_release_id,
+        "relationship": args.relationship,
+        "basis": args.basis,
+        "confidence": args.confidence,
+        "evidence_provenance_id": evidence,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/behavioural-compositions`.
+fn compose(args: &ComposeArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args.behavioural_composition_id.unwrap_or_else(Uuid::new_v4);
+    let entries: Vec<MemberEntry> = serde_json::from_slice(&fs::read(&args.members)?)?;
+    if entries.is_empty() {
+        return Err("a composition needs at least one member".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for entry in &entries {
+        if !matches!(entry.target_type.as_str(), "binary" | "function") {
+            return Err(format!(
+                "member type {:?} is not binary or function",
+                entry.target_type
+            )
+            .into());
+        }
+        if i32::try_from(entry.sequence_number.unwrap_or(0)).is_err() {
+            return Err("sequence numbers must fit a 32-bit signed integer".into());
+        }
+        if !seen.insert(entry) {
+            return Err("members must be distinct".into());
+        }
+    }
+    let members: Vec<auth::CompositionMember<'_>> = entries
+        .iter()
+        .map(|entry| auth::CompositionMember {
+            target_type: &entry.target_type,
+            target_id: entry.target_id.as_bytes(),
+            member_role: &entry.member_role,
+            sequence_number: entry.sequence_number,
+        })
+        .collect();
+    let evidence = args.evidence_provenance_id;
+    let composition = auth::BehaviouralComposition {
+        behavioural_composition_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        name: &args.name,
+        description: args.description.as_deref(),
+        evidence_provenance_id: evidence.as_ref().map(Uuid::as_bytes),
+        members: &members,
+    };
+    eprintln!(
+        "Signing: behavioural composition {id}: {:?} with members:",
+        args.name
+    );
+    for entry in &entries {
+        eprintln!(
+            "  {} {} as {:?} (sequence {:?})",
+            entry.target_type, entry.target_id, entry.member_role, entry.sequence_number
+        );
+    }
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::BEHAVIOURAL_COMPOSITION_SIGNATURE_DOMAIN,
+        &auth::behavioural_composition_digest(&composition),
+    );
+    Ok(json!({
+        "behavioural_composition_id": id,
+        "analyst_id": args.analyst_id,
+        "name": args.name,
+        "description": args.description,
+        "evidence_provenance_id": evidence,
+        "members": entries,
         "signature": hex(&signature),
     }))
 }
