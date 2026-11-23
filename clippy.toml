@@ -1,0 +1,4 @@
+# Product names written in prose, not code identifiers. ".." keeps Clippy's
+# built-in list. Older Clippy releases (such as the 1.89 MSRV toolchain) do not
+# know "PostgreSQL" and would otherwise demand backticks around it.
+doc-valid-idents = ["PostgreSQL", ".."]
