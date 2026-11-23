@@ -1108,10 +1108,10 @@ fn compose(args: &ComposeArgs) -> Result<serde_json::Value, Box<dyn std::error::
         if !seen.insert(entry) {
             return Err("members must be distinct".into());
         }
-        if let Some(position) = entry.sequence_number {
-            if !positions.insert(position) {
-                return Err(format!("sequence_number {position} is used more than once").into());
-            }
+        if let Some(position) = entry.sequence_number
+            && !positions.insert(position)
+        {
+            return Err(format!("sequence_number {position} is used more than once").into());
         }
     }
     let members: Vec<auth::CompositionMember<'_>> = entries
@@ -1270,7 +1270,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(value: &str) -> Result<Vec<u8>, &'static str> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err("hex value has odd length");
     }
     (0..value.len())
