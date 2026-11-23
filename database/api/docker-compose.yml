@@ -11,6 +11,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,noexec,nosuid
+    # PostgreSQL runs on the host and listens on 127.0.0.1 only. The API
+    # reaches it through its Unix socket, so no database port is exposed to
+    # any network. Read-only: connecting to a socket needs no write access.
+    volumes:
+      - ${RELIC_PG_SOCKET_DIR:-/var/run/postgresql}:/var/run/postgresql:ro
     cap_drop:
       - ALL
     security_opt:
@@ -51,7 +56,10 @@ services:
       - caddy_config:/config
 
 networks:
+  # Caddy <-> API only. No route out: the API needs nothing beyond Caddy and
+  # the database socket, so a compromised API cannot reach the internet.
   internal:
+    internal: true
   public:
 
 volumes:

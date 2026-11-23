@@ -40,6 +40,9 @@ permanent Ed25519 public key. Human accounts have exactly one role
 | `relic_worker` | `relic-ingest-fidbf`, `relic-chain-bsim`, `relic-checkpoint-mmr` | Appends only: FIDBF admissions (source, batch, binary, FIDBF, functions) and system-signed integrity entries and checkpoints. Reads catalogue data, never contact details, registration requests or login challenges. |
 | `relic_auditor` | `relic-verify` (e.g. from cron) | Nothing; read-only transactions by default. Reads everything it re-verifies (including registration requests and their challenges), never `user_private`. |
 
+Deployment (PostgreSQL on the host, reached through its Unix socket; workers by
+peer authentication): [`docs/deployment.md`](../../docs/deployment.md).
+
 The database checks who a row names and its shape, not its signature. Only the
 workers, which hold the system keys, may append system-signed evidence; for
 user-signed rows the API is trusted to verify, and `relic-verify` re-checks

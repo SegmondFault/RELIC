@@ -29,8 +29,9 @@ fn main() -> ExitCode {
     let arguments = Arguments::parse();
     let report = match relic_ingest::connect(&arguments.database_url)
         .map_err(|error| error.to_string())
-        .and_then(|mut client| verify(&mut client).map_err(|error| error.to_string()))
-    {
+        .and_then(|mut client| {
+            verify(&mut client).map_err(|error| relic_integrity_worker::describe_db_error(&error))
+        }) {
         Ok(report) => report,
         Err(error) => {
             eprintln!("relic-verify: could not run: {error}");

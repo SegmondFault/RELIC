@@ -972,7 +972,7 @@ pub enum IngestError {
     },
     #[error("FIDBF object verification failed: {0}")]
     ObjectVerification(VerifyError),
-    #[error("PostgreSQL operation failed: {0}")]
+    #[error("PostgreSQL operation failed: {}", relic_integrity_worker::describe_db_error(.0))]
     Database(postgres::Error),
     #[error("database identity does not exist: {0}")]
     UnknownIdentity(Uuid),

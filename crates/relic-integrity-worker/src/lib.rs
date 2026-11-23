@@ -286,9 +286,27 @@ pub fn chain_uncovered_bsim_postgres(
     })
 }
 
+/// A `PostgreSQL` error with the server's code, message and detail.
+///
+/// `postgres::Error`'s own text is only "db error" for server-side errors,
+/// which hides the cause (e.g. a permission or constraint violation).
+#[must_use]
+pub fn describe_db_error(error: &postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |db| {
+            let detail = db
+                .detail()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default();
+            format!("{} {}{detail}", db.code().code(), db.message())
+        },
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum BsimChainError {
-    #[error("database operation failed: {0}")]
+    #[error("database operation failed: {}", describe_db_error(.0))]
     Database(#[from] postgres::Error),
     #[error("integrity system identity does not exist")]
     UnknownSystemIdentity,

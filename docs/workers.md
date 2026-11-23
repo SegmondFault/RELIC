@@ -31,10 +31,12 @@ submission has verified.
 ## Database login
 
 The workers connect as `relic_worker`, never as the API's `relic_app`
-(`relic-verify` uses its own read-only `relic_auditor`):
+(`relic-verify` uses its own read-only `relic_auditor`), through the local Unix
+socket with peer authentication, so neither role has a password. Set-up:
+[`docs/deployment.md`](deployment.md).
 
-```sql
-ALTER ROLE relic_worker LOGIN PASSWORD '...';   -- migration 008 creates it NOLOGIN
+```bash
+export RELIC_DATABASE_URL='host=/var/run/postgresql dbname=relic user=relic_worker'
 ```
 
 `relic_worker` may append FIDBF admissions (source, batch, binary, FIDBF,
@@ -73,15 +75,13 @@ verified, `1` at least one failure, `2` could not run. `--json` for machines,
 
 ```cron
 # /etc/cron.d/relic-verify: hourly; cron mails any output, --quiet prints only problems.
-# /etc/relic/verify.env (mode 0600, owner relic-verify) holds
-#   export RELIC_DATABASE_URL=postgresql://relic_auditor:PASSWORD@127.0.0.1:5432/relic
-15 * * * *  relic-verify  . /etc/relic/verify.env && relic-verify --quiet
+# Peer authentication over the Unix socket: no password (see docs/deployment.md).
+15 * * * *  ns  RELIC_DATABASE_URL='host=/var/run/postgresql dbname=relic user=relic_auditor' /srv/relic/target/release/relic-verify --quiet
 ```
 
-Run it on the database host (or another trusted host), not on the API host,
-so a compromised API host cannot silence it. Like the other Rust tools it does
-not speak TLS to PostgreSQL yet: connect over loopback or a Unix-socket
-tunnel, never across a network in the clear. It detects; it does not repair: rows are append-only, and the
+Run it on the database host, outside the API's container, so a compromised
+API cannot silence it. Like the other Rust tools it does not speak TLS to
+PostgreSQL: it connects through the local Unix socket only. It detects; it does not repair: rows are append-only, and the
 response to a failure is to revoke the forged row or account and investigate.
 Locally: `scripts/local-dev.sh verify`.
 
