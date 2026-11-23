@@ -16,7 +16,8 @@ and production key custody.
 `relic-sign-fidbf` runs on the analyst's machine. It verifies the exact FIDBF
 bytes against the unsigned manifest, loads the analyst's private key locally,
 and emits a signed manifest containing no private material or local object
-path.
+path. The analyst key is an encrypted OpenSSH Ed25519 key created with
+`ssh-keygen`; see [Analyst signing keys](analyst-keys.md).
 
 `relic-ingest-fidbf` runs at the trusted ingestion boundary. It receives that
 signed manifest plus the separately staged FIDBF, looks up the analyst's public

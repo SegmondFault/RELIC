@@ -19,8 +19,9 @@ its passphrase are deliberately absent from the repository and database.
 
 ## BYO-key registration
 
-Analysts create their own Ed25519 keypair locally. RELIC never assigns,
-generates, receives or recovers the private half.
+Analysts create their own Ed25519 keypair locally, as an encrypted OpenSSH key
+generated with `ssh-keygen` (see [Analyst signing keys](analyst-keys.md)).
+RELIC never assigns, generates, receives or recovers the private half.
 
 The intended multi-party flow is:
 
