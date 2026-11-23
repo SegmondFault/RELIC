@@ -503,10 +503,18 @@ pub fn verify_manifest_signatures(
 /// The integrity-chain `record_hash` committed for an admission.
 #[must_use]
 pub fn admission_record_hash(manifest: &FidbfIngestManifest, accepted_at_micros: i64) -> Digest32 {
-    record_hash_of(&canonical_parts(manifest), manifest.analyst_user_id, accepted_at_micros)
+    record_hash_of(
+        &canonical_parts(manifest),
+        manifest.analyst_user_id,
+        accepted_at_micros,
+    )
 }
 
-fn record_hash_of(prepared: &PreparedSubmission, analyst: Uuid, accepted_at_micros: i64) -> Digest32 {
+fn record_hash_of(
+    prepared: &PreparedSubmission,
+    analyst: Uuid,
+    accepted_at_micros: i64,
+) -> Digest32 {
     sha256(&encode_fields(
         ADMISSION_RECORD_DOMAIN,
         &[
@@ -554,8 +562,13 @@ pub fn verify_source_signature(
     signature: &SignatureHex,
 ) -> Result<(), IngestError> {
     let digest = sha256(&canonical_source_of(source, analyst_user_id));
-    verify_digest_signature(public_key, SOURCE_SIGNATURE_DOMAIN, &digest, signature.as_bytes())
-        .map_err(|_| IngestError::InvalidAnalystSignature("source"))
+    verify_digest_signature(
+        public_key,
+        SOURCE_SIGNATURE_DOMAIN,
+        &digest,
+        signature.as_bytes(),
+    )
+    .map_err(|_| IngestError::InvalidAnalystSignature("source"))
 }
 
 fn canonical_batch(manifest: &FidbfIngestManifest) -> Vec<u8> {

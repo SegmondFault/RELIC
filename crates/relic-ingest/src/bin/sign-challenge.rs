@@ -4,8 +4,8 @@
 //! `POST /v1/auth/challenge`; `decide-registration` and `decide-revocation`
 //! read a request exactly as returned by `GET /v1/registrations/{id}` and
 //! `GET /v1/revocations/{id}`, and `respond-flag` reads a flag as returned by
-//! `GET /v1/flags/{id}`; `request-revocation` and `flag` take their fields as
-//! arguments. Each signs the canonical message with the user's OpenSSH Ed25519
+//! `GET /v1/flags/{id}`; `request-revocation`, `flag`, `assert-license` and
+//! `classify` take their fields as arguments. Each signs the canonical message with the user's OpenSSH Ed25519
 //! key and prints the JSON body to POST.
 
 use std::{
@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Parser)]
 #[command(
-    about = "Sign RELIC login, registration, revocation and flag messages on the user's machine"
+    about = "Sign RELIC account, revocation, flag and Analyst claim messages on the user's machine"
 )]
 struct Arguments {
     #[command(subcommand)]
@@ -126,6 +126,10 @@ enum Command {
         #[command(flatten)]
         key: KeyArgs,
     },
+    /// Sign an Analyst's SPDX licence assertion on a source or binary.
+    AssertLicense(LicenseArgs),
+    /// Sign an Analyst's classification of a binary, function or composition.
+    Classify(ClassifyArgs),
     /// Sign an Analyst's response to a flag.
     RespondFlag {
         /// Flag JSON returned by `GET /v1/flags/{id}`.
@@ -163,6 +167,76 @@ const TARGET_TYPES: [&str; 16] = [
     "flag",
     "flag_response",
 ];
+
+#[derive(Debug, Args)]
+struct LicenseArgs {
+    /// The asserting Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long, value_parser = ["source", "binary"])]
+    target_type: String,
+    #[arg(long)]
+    target_id: Uuid,
+    /// SPDX license expression, e.g. "MIT OR Apache-2.0"; signed exactly as given.
+    #[arg(long)]
+    spdx: String,
+    #[arg(long, value_parser = ["declared", "detected", "inferred", "analyst_assessed"])]
+    basis: String,
+    /// Exactly four decimals, 0.0000 to 1.0000.
+    #[arg(long, value_parser = parse_confidence)]
+    confidence: Option<String>,
+    #[arg(long)]
+    evidence_provenance_id: Option<Uuid>,
+    /// Assertion ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    license_assertion_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ClassifyArgs {
+    /// The classifying Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long, value_parser = ["binary", "function", "behavioural_composition"])]
+    target_type: String,
+    #[arg(long)]
+    target_id: Uuid,
+    #[arg(long)]
+    label: String,
+    /// Exactly four decimals, 0.0000 to 1.0000.
+    #[arg(long, value_parser = parse_confidence)]
+    confidence: Option<String>,
+    /// MISP galaxy (given together with --misp-uuid).
+    #[arg(long, requires = "misp_uuid")]
+    misp_universe: Option<String>,
+    #[arg(long, requires = "misp_universe")]
+    misp_uuid: Option<Uuid>,
+    /// JSON object file; its exact bytes are signed and stored.
+    #[arg(long)]
+    evidence: Option<PathBuf>,
+    /// Classification ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    classification_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+/// `0.0000` to `1.0000` with exactly four decimals: the form the database
+/// stores, so the signed text is what a verifier rebuilds.
+fn parse_confidence(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let ok = bytes.len() == 6
+        && bytes[1] == b'.'
+        && bytes[2..].iter().all(u8::is_ascii_digit)
+        && (bytes[0] == b'0' || (bytes[0] == b'1' && &bytes[2..] == b"0000"));
+    if ok {
+        Ok(value.to_owned())
+    } else {
+        Err("must have exactly four decimals between 0.0000 and 1.0000".into())
+    }
+}
 
 #[derive(Debug, Args)]
 struct Common {
@@ -365,6 +439,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
             &key,
         )?,
+        Command::AssertLicense(args) => assert_license(&args)?,
+        Command::Classify(args) => classify(&args)?,
         Command::RespondFlag {
             flag,
             analyst_id,
@@ -640,6 +716,90 @@ fn respond_flag(
         "flag_response_id": flag_response_id,
         "analyst_id": analyst_id,
         "note": note,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/license-assertions`.
+fn assert_license(args: &LicenseArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args.license_assertion_id.unwrap_or_else(Uuid::new_v4);
+    let evidence = args.evidence_provenance_id;
+    let assertion = auth::LicenseAssertion {
+        license_assertion_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        target_type: &args.target_type,
+        target_id: args.target_id.as_bytes(),
+        spdx_expression: &args.spdx,
+        basis: &args.basis,
+        confidence: args.confidence.as_deref(),
+        evidence_provenance_id: evidence.as_ref().map(Uuid::as_bytes),
+    };
+    eprintln!(
+        "Signing: licence assertion {id}: {} {} is {:?} ({})",
+        args.target_type, args.target_id, args.spdx, args.basis
+    );
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::LICENSE_ASSERTION_SIGNATURE_DOMAIN,
+        &auth::license_assertion_digest(&assertion),
+    );
+    Ok(json!({
+        "license_assertion_id": id,
+        "analyst_id": args.analyst_id,
+        "target_type": args.target_type,
+        "target_id": args.target_id,
+        "spdx_expression": args.spdx,
+        "basis": args.basis,
+        "confidence": args.confidence,
+        "evidence_provenance_id": evidence,
+        "signature": hex(&signature),
+    }))
+}
+
+/// Body for `POST /v1/classifications`.
+fn classify(args: &ClassifyArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let id = args.classification_id.unwrap_or_else(Uuid::new_v4);
+    let evidence = args
+        .evidence
+        .as_ref()
+        .map(|path| -> Result<String, Box<dyn std::error::Error>> {
+            let text = String::from_utf8(fs::read(path)?)?;
+            if !serde_json::from_str::<serde_json::Value>(&text)?.is_object() {
+                return Err("evidence must be a JSON object".into());
+            }
+            Ok(text)
+        })
+        .transpose()?;
+    let classification = auth::Classification {
+        classification_id: id.as_bytes(),
+        analyst_id: args.analyst_id.as_bytes(),
+        target_type: &args.target_type,
+        target_id: args.target_id.as_bytes(),
+        label: &args.label,
+        confidence: args.confidence.as_deref(),
+        misp_universe: args.misp_universe.as_deref(),
+        misp_uuid: args.misp_uuid.as_ref().map(Uuid::as_bytes),
+        evidence_json: evidence.as_deref(),
+    };
+    eprintln!(
+        "Signing: classification {id}: {} {} is {:?}",
+        args.target_type, args.target_id, args.label
+    );
+    let signer = load_key(&args.key)?;
+    let signature = signer.sign_digest(
+        auth::CLASSIFICATION_SIGNATURE_DOMAIN,
+        &auth::classification_digest(&classification),
+    );
+    Ok(json!({
+        "classification_id": id,
+        "analyst_id": args.analyst_id,
+        "target_type": args.target_type,
+        "target_id": args.target_id,
+        "label": args.label,
+        "confidence": args.confidence,
+        "misp_universe": args.misp_universe,
+        "misp_uuid": args.misp_uuid,
+        "evidence_json": evidence,
         "signature": hex(&signature),
     }))
 }

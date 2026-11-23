@@ -124,9 +124,10 @@ def corpus(database) -> Corpus:
     classification_id = uuid.uuid4()
     run(
         "INSERT INTO catalogue.classification (classification_id, target_type, target_id, label,"
-        " confidence, analyst_id, evidence, signature)"
-        " VALUES (%s, 'binary', %s, 'packer', 0.1234, %s, %s, %s)",
-        (classification_id, binary_id, analyst.user_id, Jsonb({"why": "entropy"}), sig),
+        " confidence, analyst_id, evidence, evidence_json, signature)"
+        " VALUES (%s, 'binary', %s, 'packer', 0.1234, %s, %s::jsonb, %s, %s)",
+        (classification_id, binary_id, analyst.user_id, '{"why": "entropy"}',
+         '{"why": "entropy"}', sig),
     )
     flag_id, flag_response_id = uuid.uuid4(), uuid.uuid4()
     run(

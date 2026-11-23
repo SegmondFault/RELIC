@@ -36,7 +36,7 @@ permanent Ed25519 public key. Human accounts have exactly one role
 | Login | Used by | May write |
 |---|---|---|
 | `relic_owner` | Migrations and the database operator (NOLOGIN; reached with `SET ROLE`) | Everything. Owns the schema. Creates the first Moderator and system accounts, and is the only one allowed to revoke a system account. |
-| `relic_app` | This API (`RELIC_DATABASE_URL`) | Inserts only what its routes write: challenges, registration requests, first approvals, revocations, flags and responses; each submission route will grant its own table. New tables are read-only for it by default. Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
+| `relic_app` | This API (`RELIC_DATABASE_URL`) | Inserts only what its routes write: challenges, registration requests, first approvals, revocations, flags and responses, licence assertions and classifications; each further submission route grants its own table. New tables are read-only for it by default. Accounts only through `decide_registration()`. Never the integrity chain or MMR checkpoints; cannot read contact details. No `DELETE` anywhere. |
 | `relic_worker` | `relic-ingest-fidbf`, `relic-chain-bsim`, `relic-checkpoint-mmr` | Appends only: FIDBF admissions (source, batch, binary, FIDBF, functions) and system-signed integrity entries and checkpoints. Reads catalogue data, never contact details, registration requests or login challenges. |
 | `relic_auditor` | `relic-verify` (e.g. from cron) | Nothing; read-only transactions by default. Reads everything it re-verifies (including registration requests and their challenges), never `user_private`. |
 
@@ -123,8 +123,8 @@ designed).
 | `/v1/bsim`, `/v1/bsim/{id}` | `source_id`, `sha256` | BSim similarity objects; `object_data` on `/{id}` only. |
 | `/v1/function-bsim` | `function_id`, `binary_id`, `bsim_id` | Which functions each BSim object describes. |
 | `/v1/provenance`, `/v1/provenance/{id}` | `source_id`, `fidbf_id`, `bsim_id`, `binary_id` | OCSF-style provenance seals; `object_data` on `/{id}` only. |
-| `/v1/license-assertions`, `/v1/license-assertions/{id}` | `source_id`, `binary_id` | Signed SPDX licence claims on one source or one binary. |
-| `/v1/classifications`, `/v1/classifications/{id}` | `target_type`, `target_id` | Signed labels on binaries, functions or behavioural compositions; `evidence` on `/{id}` only. |
+| `/v1/license-assertions`, `/v1/license-assertions/{id}` | `source_id`, `binary_id` | Signed SPDX licence claims on one source or one binary, with `target_type` and `target_id` as signed. |
+| `/v1/classifications`, `/v1/classifications/{id}` | `target_type`, `target_id` | Signed labels on binaries, functions or behavioural compositions; `evidence` and the signed `evidence_json` on `/{id}` only. |
 | `/v1/flags`, `/v1/flags/{id}` | `target_type`, `target_id` | Viewer flags on objects, accounts, flags or responses, in the exact shape `respond-flag` signs. |
 | `/v1/flag-responses`, `/v1/flag-responses/{id}` | `flag_id` | Analyst responses to flags. |
 | `/v1/revocations`, `/v1/revocations/{id}` | see Revocations | Revocation requests and moderator decisions. |
@@ -138,8 +138,15 @@ compositions have no read routes yet.
 ### Corpus submissions
 
 Each returns `201 Created`. Each is atomic: the object, its related rows and
-its integrity-chain entry commit together or not at all. An identical retry
-returns the original result; the same ID with different content is a conflict.
+(for sources, batches, FIDBF, BSim and provenance) its integrity-chain entry
+commit together or not at all. An identical retry returns the original result
+(`200`); the same ID with different content is a conflict (`409`).
+
+Licence assertions and classifications are implemented. Signed formats:
+[`docs/authentication.md`](../../docs/authentication.md#licence-assertion);
+`relic-sign-challenge assert-license` and `classify` produce the bodies. The
+other submission routes return `501` until integrity-key custody and object
+storage are decided.
 
 | Method | Path | Role | Description |
 |---|---|---|---|
@@ -148,8 +155,8 @@ returns the original result; the same ID with different content is a conflict.
 | `POST` | `/v1/fidbf` | Analyst · Signed | Admit a FIDBF object together with its source, batch, binary, functions and integrity entry. Reference implementation: `crates/relic-ingest`. |
 | `POST` | `/v1/bsim` | Analyst · Signed | Admit a BSim object and its function links. |
 | `POST` | `/v1/provenance` | Analyst · Signed | Submit a provenance seal (a JSON object). The server re-checks its hashes and keeps `unmapped.relic` intact. |
-| `POST` | `/v1/license-assertions` | Analyst · Signed | Claim an SPDX licence for one source or binary. Immutable: corrections are a new assertion plus a revocation. |
-| `POST` | `/v1/classifications` | Analyst · Signed | Label a binary, function or behavioural composition. |
+| `POST` | `/v1/license-assertions` | Analyst · Signed | `{license_assertion_id, analyst_id, target_type (source\|binary), target_id, spdx_expression, basis, confidence?, evidence_provenance_id?, signature}`: claim an SPDX licence. `confidence` has exactly four decimals. Immutable: corrections are a new assertion plus a revocation. `403` bad signature; `409` ID reused or target revoked; `422` invalid expression, unknown target or evidence. |
+| `POST` | `/v1/classifications` | Analyst · Signed | `{classification_id, analyst_id, target_type (binary\|function\|behavioural_composition), target_id, label, confidence?, misp_universe?, misp_uuid?, evidence_json?, signature}`: label one object. `evidence_json` is a JSON object as a string, signed and stored verbatim (the parsed `evidence` is stored too). Immutable. Same status codes. |
 
 ### Flags
 

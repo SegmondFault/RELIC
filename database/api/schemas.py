@@ -6,13 +6,16 @@ rejected, never trimmed or normalised.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+from .spdx import SpdxError, validate as validate_spdx
 
 Role = Literal["viewer", "analyst", "moderator"]
 
@@ -355,6 +358,8 @@ class ProvenanceDetail(Provenance):
 
 class LicenseAssertion(BaseModel):
     license_assertion_id: UUID
+    target_type: Literal["source", "binary"]
+    target_id: UUID
     source_id: UUID | None
     binary_id: UUID | None
     spdx_expression: str
@@ -386,6 +391,7 @@ class Classification(BaseModel):
 
 class ClassificationDetail(Classification):
     evidence: Any
+    evidence_json: str | None = Field(description="The evidence exactly as signed")
 
 
 class Flag(BaseModel):
@@ -455,3 +461,101 @@ class MmrCheckpoint(BaseModel):
     created_at: datetime
     system_uid: UUID
     system_signature: Signature
+
+
+# ---------------------------------------------------------------------------
+# Licence assertions and classifications (signed by Analysts)
+# ---------------------------------------------------------------------------
+
+
+def _spdx(value: str) -> str:
+    try:
+        return validate_spdx(value)
+    except SpdxError as error:
+        raise ValueError(f"not an SPDX license expression: {error}") from error
+
+
+def _duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate keys")
+    return dict(pairs)
+
+
+MAX_EVIDENCE_DEPTH = 32
+
+
+def _evidence(value: str) -> str:
+    def no_constant(name: str) -> None:
+        raise ValueError(f"{name} is not JSON")
+
+    try:
+        parsed = json.loads(value, object_pairs_hook=_duplicate_keys, parse_constant=no_constant)
+    except RecursionError as error:
+        raise ValueError("nested too deeply") from error
+    except ValueError as error:
+        raise ValueError(f"must be a JSON object ({error})") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("must be a JSON object")
+    # Iterative walk: bounded depth, and no NUL (PostgreSQL jsonb cannot store it).
+    stack: list[tuple[Any, int]] = [(parsed, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_EVIDENCE_DEPTH:
+            raise ValueError(f"nested deeper than {MAX_EVIDENCE_DEPTH} levels")
+        if isinstance(item, str) and "\x00" in item:
+            raise ValueError("must not contain NUL characters")
+        if isinstance(item, dict):
+            stack.extend((key, depth) for key in item)
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+    return value
+
+
+Confidence = Annotated[
+    str,
+    Field(
+        pattern=r"^(0\.[0-9]{4}|1\.0000)$",
+        description="Exactly four decimals, 0.0000 to 1.0000 (signed as written)",
+    ),
+]
+SpdxExpression = Annotated[
+    str, Field(min_length=1, max_length=1000), AfterValidator(_clean_text), AfterValidator(_spdx)
+]
+EvidenceJson = Annotated[
+    str,
+    Field(min_length=2, max_length=32_768, description="A JSON object, signed and stored verbatim"),
+    AfterValidator(_evidence),
+]
+
+
+class LicenseAssertionSubmission(_Request):
+    license_assertion_id: UUID = Field(description="Chosen by the Analyst; makes the claim single-use")
+    analyst_id: UUID = Field(description="The asserting Analyst: must be the caller")
+    target_type: Literal["source", "binary"]
+    target_id: UUID
+    spdx_expression: SpdxExpression
+    basis: Literal["declared", "detected", "inferred", "analyst_assessed"]
+    confidence: Confidence | None = None
+    evidence_provenance_id: UUID | None = None
+    signature: HexSignature
+
+
+class ClassificationSubmission(_Request):
+    classification_id: UUID = Field(description="Chosen by the Analyst; makes the label single-use")
+    analyst_id: UUID = Field(description="The classifying Analyst: must be the caller")
+    target_type: ClassificationTarget
+    target_id: UUID
+    label: DisplayText
+    confidence: Confidence | None = None
+    misp_universe: DisplayText | None = None
+    misp_uuid: UUID | None = None
+    evidence_json: EvidenceJson | None = None
+    signature: HexSignature
+
+    @model_validator(mode="after")
+    def _misp_pair(self) -> "ClassificationSubmission":
+        if (self.misp_universe is None) != (self.misp_uuid is None):
+            raise ValueError("misp_universe and misp_uuid are given together or not at all")
+        return self

@@ -150,6 +150,47 @@ def test_flag_response_vectors(case):
     _check_signed_case(case, record, crypto.FLAG_RESPONSE_SIGNATURE_DOMAIN)
 
 
+def _uuid_or_none(value: str | None) -> uuid.UUID | None:
+    return None if value is None else uuid.UUID(hex=value)
+
+
+@pytest.mark.parametrize("case", VECTORS["license_assertion"], ids=lambda case: case["name"])
+def test_license_assertion_vectors(case):
+    i = case["inputs"]
+    record = crypto.license_assertion_record(
+        crypto.LicenseAssertion(
+            license_assertion_id=uuid.UUID(hex=i["license_assertion_id"]),
+            analyst_id=uuid.UUID(hex=i["analyst_id"]),
+            target_type=i["target_type"],
+            target_id=uuid.UUID(hex=i["target_id"]),
+            spdx_expression=i["spdx_expression"],
+            basis=i["basis"],
+            confidence=i["confidence"],
+            evidence_provenance_id=_uuid_or_none(i["evidence_provenance_id"]),
+        )
+    )
+    _check_signed_case(case, record, crypto.LICENSE_ASSERTION_SIGNATURE_DOMAIN)
+
+
+@pytest.mark.parametrize("case", VECTORS["classification"], ids=lambda case: case["name"])
+def test_classification_vectors(case):
+    i = case["inputs"]
+    record = crypto.classification_record(
+        crypto.Classification(
+            classification_id=uuid.UUID(hex=i["classification_id"]),
+            analyst_id=uuid.UUID(hex=i["analyst_id"]),
+            target_type=i["target_type"],
+            target_id=uuid.UUID(hex=i["target_id"]),
+            label=i["label"],
+            confidence=i["confidence"],
+            misp_universe=i["misp_universe"],
+            misp_uuid=_uuid_or_none(i["misp_uuid"]),
+            evidence_json=i["evidence_json"],
+        )
+    )
+    _check_signed_case(case, record, crypto.CLASSIFICATION_SIGNATURE_DOMAIN)
+
+
 def test_small_order_public_key_is_rejected():
     # The identity point: any "signature" with R = identity and S = 0 would
     # verify under a non-strict verifier.

@@ -165,19 +165,96 @@ fn flag_vectors() -> (Vec<Value>, Vec<Value>) {
     (flags, responses)
 }
 
-fn build_vectors() -> Value {
-    let challenge = challenge();
+/// Licence assertions (with and without optional fields) and classifications.
+fn claim_vectors() -> (Vec<Value>, Vec<Value>) {
+    let analyst_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
+    let target_id = *b"\xa1\x37\x5e\x08\xd4\x6c\x41\x9f\x83\x2b\x90\x4e\x17\xf5\x6a\xc2";
+    let evidence_id = *b"\x19\x2c\x7d\x4e\x5f\x60\x41\x82\x93\xa4\xb5\xc6\xd7\xe8\xf9\x0a";
+    let mut licenses = Vec::new();
+    for (name, id_byte, confidence, evidence) in [
+        (
+            "license-assertion-full",
+            0x31_u8,
+            Some("0.9500"),
+            Some(&evidence_id),
+        ),
+        ("license-assertion-minimal", 0x32_u8, None, None),
+    ] {
+        let id = [id_byte; 16];
+        let assertion = auth::LicenseAssertion {
+            license_assertion_id: &id,
+            analyst_id: &analyst_id,
+            target_type: "binary",
+            target_id: &target_id,
+            spdx_expression: "(MIT OR Apache-2.0) AND GPL-2.0-only WITH Classpath-exception-2.0",
+            basis: "detected",
+            confidence,
+            evidence_provenance_id: evidence,
+        };
+        licenses.push(signed_case(
+            name,
+            [0x55; 32],
+            &auth::license_assertion_record(&assertion),
+            auth::LICENSE_ASSERTION_SIGNATURE_DOMAIN,
+            json!({
+                "license_assertion_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "target_type": assertion.target_type,
+                "target_id": hex(&target_id),
+                "spdx_expression": assertion.spdx_expression,
+                "basis": assertion.basis,
+                "confidence": confidence,
+                "evidence_provenance_id": evidence.map(|id| hex(id)),
+            }),
+        ));
+    }
+    let misp_uuid = *b"\x5e\x6f\x70\x81\x92\xa3\x4b\xc4\x8d\xe5\xf6\x07\x18\x29\x3a\x4b";
+    let mut classifications = Vec::new();
+    for (name, id_byte, confidence, misp, evidence) in [
+        (
+            "classification-full",
+            0x41_u8,
+            Some("1.0000"),
+            Some(("mitre-attack-pattern", &misp_uuid)),
+            Some("{\"tool\": \"capa\",  \"score\": 0.93, \"Ünïcode\": [1, 2]}"),
+        ),
+        ("classification-minimal", 0x42_u8, None, None, None),
+    ] {
+        let id = [id_byte; 16];
+        let classification = auth::Classification {
+            classification_id: &id,
+            analyst_id: &analyst_id,
+            target_type: "function",
+            target_id: &target_id,
+            label: "crypto/aes-key-expansion",
+            confidence,
+            misp_universe: misp.map(|(universe, _)| universe),
+            misp_uuid: misp.map(|(_, uuid)| uuid),
+            evidence_json: evidence,
+        };
+        classifications.push(signed_case(
+            name,
+            [0x55; 32],
+            &auth::classification_record(&classification),
+            auth::CLASSIFICATION_SIGNATURE_DOMAIN,
+            json!({
+                "classification_id": hex(&id),
+                "analyst_id": hex(&analyst_id),
+                "target_type": classification.target_type,
+                "target_id": hex(&target_id),
+                "label": classification.label,
+                "confidence": confidence,
+                "misp_universe": classification.misp_universe,
+                "misp_uuid": misp.map(|(_, uuid)| hex(uuid)),
+                "evidence_json": evidence,
+            }),
+        ));
+    }
+    (licenses, classifications)
+}
 
-    let login_seed = [0x11; 32];
-    let login_key = SystemSigner::from_seed(login_seed).verifying_key();
-    let login = signed_case(
-        "login",
-        login_seed,
-        &auth::login_record(&challenge, &login_key),
-        auth::LOGIN_SIGNATURE_DOMAIN,
-        json!({ "challenge": challenge_json(&challenge) }),
-    );
-
+/// Registration proofs, with and without an organisation.
+fn registration_vectors(challenge: &auth::AuthChallenge) -> Vec<Value> {
     let mut registrations = Vec::new();
     for (name, seed, organisation, role) in [
         (
@@ -204,10 +281,10 @@ fn build_vectors() -> Value {
         registrations.push(signed_case(
             name,
             seed,
-            &auth::registration_record(&challenge, &details),
+            &auth::registration_record(challenge, &details),
             auth::REGISTRATION_SIGNATURE_DOMAIN,
             json!({
-                "challenge": challenge_json(&challenge),
+                "challenge": challenge_json(challenge),
                 "requested_role": role,
                 "name": details.name,
                 "organisation": organisation,
@@ -215,6 +292,23 @@ fn build_vectors() -> Value {
             }),
         ));
     }
+    registrations
+}
+
+fn build_vectors() -> Value {
+    let challenge = challenge();
+
+    let login_seed = [0x11; 32];
+    let login_key = SystemSigner::from_seed(login_seed).verifying_key();
+    let login = signed_case(
+        "login",
+        login_seed,
+        &auth::login_record(&challenge, &login_key),
+        auth::LOGIN_SIGNATURE_DOMAIN,
+        json!({ "challenge": challenge_json(&challenge) }),
+    );
+
+    let registrations = registration_vectors(&challenge);
 
     let request_id = *b"\x3c\x9e\x1d\x52\x0b\x7a\x4f\x10\x9e\x44\xd2\x61\x05\xaa\x7b\x38";
     let moderator_id = *b"\x9d\x02\x6e\x41\x5c\xb3\x47\x88\x81\x0f\x3a\x5e\xc4\x27\x19\x6b";
@@ -264,9 +358,12 @@ fn build_vectors() -> Value {
         revocation_vectors(&moderator_id, moderator_seed);
 
     let (flags, flag_responses) = flag_vectors();
+    let (license_assertions, classifications) = claim_vectors();
 
     json!({
         "format": "relic-auth-vectors/1",
+        "license_assertion": license_assertions,
+        "classification": classifications,
         "flag": flags,
         "flag_response": flag_responses,
         "registration_decision": decisions,

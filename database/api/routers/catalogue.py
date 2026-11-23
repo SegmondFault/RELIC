@@ -242,7 +242,9 @@ LICENSE_ASSERTIONS = _Resource(
     table="catalogue.license_assertion",
     key="license_assertion_id",
     name="Licence assertion",
-    columns=f"""t.license_assertion_id, t.source_id, t.binary_id, t.spdx_expression,
+    columns=f"""t.license_assertion_id,
+        CASE WHEN t.source_id IS NOT NULL THEN 'source' ELSE 'binary' END AS target_type,
+        coalesce(t.source_id, t.binary_id) AS target_id, t.source_id, t.binary_id, t.spdx_expression,
         t.basis::text AS basis, t.confidence::text AS confidence, t.evidence_provenance_id,
         t.created_at, t.submitted_by_analyst_id, encode(t.signature, 'hex') AS signature,
         {_revoked('license_assertion', 'license_assertion_id')}""",
@@ -256,7 +258,7 @@ CLASSIFICATIONS = _Resource(
         t.confidence::text AS confidence, t.analyst_id, t.misp_universe, t.misp_uuid,
         t.created_at, encode(t.signature, 'hex') AS signature,
         {_revoked('classification', 'classification_id')}""",
-    detail="t.evidence",
+    detail="t.evidence, t.evidence_json",
 )
 
 FLAGS = _Resource(

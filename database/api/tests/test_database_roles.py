@@ -46,7 +46,7 @@ def _granted(database, role: str, privilege: str) -> set[str]:
 
 API_INSERTS = {
     "auth_challenge", "registration_request", "registration_approval", "revocation",
-    "revocation_approval", "flag", "flag_response",
+    "revocation_approval", "flag", "flag_response", "license_assertion", "classification",
 }
 
 

@@ -1,6 +1,6 @@
-//! Canonical account messages: login, registration proof-of-possession,
-//! registration decisions, revocation requests and decisions, and flags and
-//! flag responses.
+//! Canonical signed user messages: login, registration proof-of-possession,
+//! registration decisions, revocation requests and decisions, flags and flag
+//! responses, licence assertions and classifications.
 //!
 //! Login and registration proofs are signed over a single-use server
 //! challenge. Decisions, revocation requests, flags and flag responses are
@@ -42,6 +42,15 @@ pub const FLAG_SIGNATURE_DOMAIN: &[u8] = b"RELIC:flag-signature:v1";
 pub const FLAG_RESPONSE_RECORD_DOMAIN: &[u8] = b"RELIC:flag-response:v1";
 /// Signature domain for an Analyst's response to a flag.
 pub const FLAG_RESPONSE_SIGNATURE_DOMAIN: &[u8] = b"RELIC:flag-response-signature:v1";
+
+/// Record domain for an Analyst's licence assertion.
+pub const LICENSE_ASSERTION_RECORD_DOMAIN: &[u8] = b"RELIC:license-assertion:v1";
+/// Signature domain for an Analyst's licence assertion.
+pub const LICENSE_ASSERTION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:license-assertion-signature:v1";
+/// Record domain for an Analyst's classification.
+pub const CLASSIFICATION_RECORD_DOMAIN: &[u8] = b"RELIC:classification:v1";
+/// Signature domain for an Analyst's classification.
+pub const CLASSIFICATION_SIGNATURE_DOMAIN: &[u8] = b"RELIC:classification-signature:v1";
 
 /// A Moderator's verdict on a pending registration or revocation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +112,12 @@ pub fn encode_optional(value: Option<&str>) -> Vec<u8> {
             encoded
         },
     )
+}
+
+/// Encode optional bytes (e.g. a UUID) as `0x00` (absent) or `0x01 || bytes`.
+#[must_use]
+pub fn encode_optional_bytes(value: Option<&[u8]>) -> Vec<u8> {
+    value.map_or_else(|| vec![0], |value| [&[1][..], value].concat())
 }
 
 /// Canonical login record bytes.
@@ -362,4 +377,92 @@ pub fn flag_response_digest(
         analyst_id,
         note,
     ))
+}
+
+/// An Analyst's claim that one source or binary carries an SPDX licence.
+///
+/// The Analyst chooses `license_assertion_id` (a fresh UUID); it is the
+/// stored row's primary key, so a signed assertion is admitted at most once.
+/// Assertions are immutable: a correction is a new assertion plus a
+/// revocation of the old one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LicenseAssertion<'a> {
+    pub license_assertion_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    /// `source` or `binary`.
+    pub target_type: &'a str,
+    pub target_id: &'a [u8; 16],
+    /// An SPDX license expression, exactly as submitted.
+    pub spdx_expression: &'a str,
+    /// `declared`, `detected`, `inferred` or `analyst_assessed`.
+    pub basis: &'a str,
+    /// Exactly four decimals between `0.0000` and `1.0000`, as stored.
+    pub confidence: Option<&'a str>,
+    pub evidence_provenance_id: Option<&'a [u8; 16]>,
+}
+
+/// Canonical bytes of a licence assertion.
+#[must_use]
+pub fn license_assertion_record(assertion: &LicenseAssertion<'_>) -> Vec<u8> {
+    encode_fields(
+        LICENSE_ASSERTION_RECORD_DOMAIN,
+        &[
+            assertion.license_assertion_id,
+            assertion.analyst_id,
+            assertion.target_type.as_bytes(),
+            assertion.target_id,
+            assertion.spdx_expression.as_bytes(),
+            assertion.basis.as_bytes(),
+            &encode_optional(assertion.confidence),
+            &encode_optional_bytes(assertion.evidence_provenance_id.map(|id| &id[..])),
+        ],
+    )
+}
+
+/// Digest signed under [`LICENSE_ASSERTION_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn license_assertion_digest(assertion: &LicenseAssertion<'_>) -> Digest32 {
+    sha256(&license_assertion_record(assertion))
+}
+
+/// An Analyst's label on one binary, function or behavioural composition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Classification<'a> {
+    pub classification_id: &'a [u8; 16],
+    pub analyst_id: &'a [u8; 16],
+    /// `binary`, `function` or `behavioural_composition`.
+    pub target_type: &'a str,
+    pub target_id: &'a [u8; 16],
+    pub label: &'a str,
+    /// Exactly four decimals between `0.0000` and `1.0000`, as stored.
+    pub confidence: Option<&'a str>,
+    pub misp_universe: Option<&'a str>,
+    pub misp_uuid: Option<&'a [u8; 16]>,
+    /// The evidence JSON text exactly as submitted (and stored verbatim).
+    pub evidence_json: Option<&'a str>,
+}
+
+/// Canonical bytes of a classification.
+#[must_use]
+pub fn classification_record(classification: &Classification<'_>) -> Vec<u8> {
+    encode_fields(
+        CLASSIFICATION_RECORD_DOMAIN,
+        &[
+            classification.classification_id,
+            classification.analyst_id,
+            classification.target_type.as_bytes(),
+            classification.target_id,
+            classification.label.as_bytes(),
+            &encode_optional(classification.confidence),
+            &encode_optional(classification.misp_universe),
+            &encode_optional_bytes(classification.misp_uuid.map(|id| &id[..])),
+            &encode_optional(classification.evidence_json),
+        ],
+    )
+}
+
+/// Digest signed under [`CLASSIFICATION_SIGNATURE_DOMAIN`].
+#[must_use]
+pub fn classification_digest(classification: &Classification<'_>) -> Digest32 {
+    sha256(&classification_record(classification))
 }

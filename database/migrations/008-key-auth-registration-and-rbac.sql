@@ -31,6 +31,8 @@
 --   longer append to the integrity chain or MMR checkpoints, and inserts
 --   only into the tables its routes write (new tables: read-only by default).
 -- * relic_auditor: a read-only login for relic-verify.
+-- * Classifications keep their evidence as the exact signed JSON text, are
+--   immutable, and like licence assertions are refused on revoked targets.
 -- * Approving a Moderator registration, and approving the revocation of a
 --   Moderator account, need two different active Moderators.
 -- * Foreign-key indexes used by filtered catalogue lists also cover the
@@ -542,6 +544,72 @@ $$;
 CREATE TRIGGER revocation_is_final
 BEFORE INSERT OR UPDATE OR DELETE ON revocation
 FOR EACH ROW EXECUTE FUNCTION guard_revocation();
+
+-- ---------------------------------------------------------------------------
+-- Licence assertions and classifications
+-- ---------------------------------------------------------------------------
+
+-- A classification's evidence is signed as the exact JSON text the Analyst
+-- submitted. jsonb reorders keys and rewrites numbers, so that text is kept
+-- verbatim beside the queryable jsonb and must parse to the same value.
+ALTER TABLE classification
+    ADD COLUMN evidence_json text,
+    ADD CONSTRAINT classification_evidence_verbatim
+        CHECK ((evidence IS NULL) = (evidence_json IS NULL)
+               AND (evidence_json IS NULL OR evidence_json::jsonb = evidence)),
+    ADD CONSTRAINT classification_misp_pair
+        CHECK ((misp_universe IS NULL) = (misp_uuid IS NULL)),
+    ADD CONSTRAINT classification_misp_universe_nonblank
+        CHECK (misp_universe IS NULL OR btrim(misp_universe) <> '');
+
+COMMENT ON COLUMN classification.evidence_json IS
+    'Evidence JSON exactly as signed; evidence is the same value as jsonb.';
+
+-- Like flags: nothing new is asserted about a revoked target, and created_at
+-- comes from the database clock.
+CREATE FUNCTION guard_license_assertion()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Target % is revoked', coalesce(NEW.source_id, NEW.binary_id)
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER license_assertion_target_not_revoked
+BEFORE INSERT ON license_assertion
+FOR EACH ROW EXECUTE FUNCTION guard_license_assertion();
+
+CREATE FUNCTION guard_classification()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Classifications are immutable; append a replacement and revoke this classification'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the role and existence checks (triggers run in name order).
+CREATE TRIGGER classification_target_not_revoked
+BEFORE INSERT OR UPDATE OR DELETE ON classification
+FOR EACH ROW EXECUTE FUNCTION guard_classification();
 
 -- ---------------------------------------------------------------------------
 -- Two-Moderator approval for Moderator powers
@@ -1064,6 +1132,9 @@ REVOKE INSERT ON
     classification
 FROM relic_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FROM relic_app;
+
+-- POST /v1/license-assertions and POST /v1/classifications.
+GRANT INSERT ON license_assertion, classification TO relic_app;
 
 GRANT USAGE ON SCHEMA catalogue TO relic_worker;
 

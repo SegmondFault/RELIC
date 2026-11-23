@@ -1,4 +1,4 @@
-# Authentication, registration, revocation and flags
+# Signed messages: authentication, registration, revocation, flags and claims
 
 RELIC has no passwords. Every human account is an Ed25519 public key, and
 authentication is proof of possession of the matching private key over a
@@ -194,6 +194,40 @@ A response can itself be flagged and revoked (`target_type = flag_response`).
 Anyone logged in can read flags and responses and re-verify both signatures
 from the two rows.
 
+### Licence assertion
+
+- `D = RELIC:license-assertion:v1`, `S = RELIC:license-assertion-signature:v1`
+- fields: `license_assertion_id`, `analyst_id`, `target_type` (`source` or
+  `binary`), `target_id`, `spdx_expression`, `basis` (`declared`, `detected`,
+  `inferred`, `analyst_assessed`), `confidence` (optional), and
+  `evidence_provenance_id` (optional: `0x00`, or `0x01` and the 16 UUID bytes)
+- `POST /v1/license-assertions` with those values plus `signature`
+
+`confidence` is signed as text with exactly four decimals (`0.0000` to
+`1.0000`), the form PostgreSQL stores, so the row rebuilds to the signed
+bytes; `"0.5"` is refused. The API checks the SPDX expression's syntax
+(identifiers are not looked up in the SPDX licence list; local licences use
+`LicenseRef-`), and stores and signs it exactly as given. No integrity-chain
+entry: an assertion is an independent, immutable claim. A correction is a new
+assertion plus a revocation of the old one. Refused on a revoked target
+(`409`); an unknown target or evidence row is `422`.
+
+### Classification
+
+- `D = RELIC:classification:v1`, `S = RELIC:classification-signature:v1`
+- fields: `classification_id`, `analyst_id`, `target_type` (`binary`,
+  `function` or `behavioural_composition`), `target_id`, `label`, then the
+  optional `confidence` (four decimals, as above), `misp_universe`,
+  `misp_uuid` (`0x00`, or `0x01` and 16 bytes) and `evidence_json`
+- `POST /v1/classifications` with those values plus `signature`
+
+`evidence_json` is a JSON object sent as a string and signed as that exact
+text (no duplicate keys, no `NaN`, at most 32 levels deep). PostgreSQL's
+`jsonb` reorders keys and rewrites numbers, so the exact text is stored next
+to the parsed `evidence` and must parse to the same value; reads return both.
+`misp_universe` and `misp_uuid` come together. Classifications are immutable
+and refused on revoked targets, like licence assertions.
+
 ## Client
 
 Generate a key used only for RELIC, and build the signer:
@@ -310,4 +344,21 @@ target/release/relic-sign-challenge respond-flag --flag flag.json \
 curl -s -X POST https://$HOST/v1/flags/$FLAG_ID/responses \
      -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
      -d @response.json
+```
+
+**Assert a licence or classify** (Analyst). Resending the printed body is a
+safe retry:
+
+```bash
+target/release/relic-sign-challenge assert-license --analyst-id "$ANALYST_ID" \
+     --target-type binary --target-id "$BINARY_ID" --spdx "MIT OR Apache-2.0" \
+     --basis detected --confidence 0.9500 --key ~/.ssh/relic_ed25519 > license.json
+curl -s -X POST https://$HOST/v1/license-assertions \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @license.json
+
+target/release/relic-sign-challenge classify --analyst-id "$ANALYST_ID" \
+     --target-type function --target-id "$FUNCTION_ID" --label crypto/aes \
+     --evidence evidence.json --key ~/.ssh/relic_ed25519 > classification.json
+curl -s -X POST https://$HOST/v1/classifications \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @classification.json
 ```

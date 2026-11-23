@@ -56,6 +56,7 @@ read-only snapshot, as `relic_auditor`:
   request; a Moderator approved without a second Moderator is a failure;
 - revocation requests, decisions and first approvals;
 - flags and flag responses;
+- licence assertions and classifications;
 - every source signature, and every FIDBF admission rebuilt from its source,
   batch, binary, function and FIDBF rows (all three analyst signatures);
 - the integrity chain: one linear chain from one genesis, every chain hash and
@@ -64,8 +65,8 @@ read-only snapshot, as `relic_auditor`:
 - every MMR checkpoint against the MMR rebuilt from the chain, and its
   system signature.
 
-Rows without a canonical signed format yet (BSim, provenance, licence
-assertions, classifications, compositions, component assertions) and accounts
+Rows without a canonical signed format yet (BSim, provenance, compositions,
+component assertions) and accounts
 created by the operator are counted as not checkable. Exit status: `0`
 verified, `1` at least one failure, `2` could not run. `--json` for machines,
 `--quiet` prints only failures and warnings.

@@ -113,6 +113,8 @@ pub fn verify(client: &mut Client) -> Result<Report, postgres::Error> {
     operator_accounts(&accounts, &registered, &mut report);
     revocations(&mut tx, &accounts, &mut report)?;
     flags(&mut tx, &accounts, &mut report)?;
+    license_assertions(&mut tx, &accounts, &mut report)?;
+    classifications(&mut tx, &accounts, &mut report)?;
     sources(&mut tx, &accounts, &mut report)?;
 
     let chain = integrity_chain(&mut tx, &accounts, &mut report)?;
@@ -567,6 +569,109 @@ fn flags(
             &signature,
         ) {
             report.checked("flag responses");
+        }
+    }
+    Ok(())
+}
+
+fn license_assertions(
+    tx: &mut Transaction<'_>,
+    accounts: &Accounts,
+    report: &mut Report,
+) -> Result<(), postgres::Error> {
+    let rows = tx.query(
+        "SELECT license_assertion_id, source_id, binary_id, spdx_expression, basis::text,
+                confidence::text, evidence_provenance_id, submitted_by_analyst_id, signature
+           FROM catalogue.license_assertion",
+        &[],
+    )?;
+    for row in &rows {
+        let id: Uuid = row.get(0);
+        let source: Option<Uuid> = row.get(1);
+        let binary: Option<Uuid> = row.get(2);
+        let target_type = if source.is_some() { "source" } else { "binary" };
+        let Some(target) = source.or(binary) else {
+            report.fail("licence assertion", id, "has no target");
+            continue;
+        };
+        let spdx: String = row.get(3);
+        let basis: String = row.get(4);
+        let confidence: Option<String> = row.get(5);
+        let evidence: Option<Uuid> = row.get(6);
+        let analyst: Uuid = row.get(7);
+        let signature: Vec<u8> = row.get(8);
+        let assertion = auth::LicenseAssertion {
+            license_assertion_id: id.as_bytes(),
+            analyst_id: analyst.as_bytes(),
+            target_type,
+            target_id: target.as_bytes(),
+            spdx_expression: &spdx,
+            basis: &basis,
+            confidence: confidence.as_deref(),
+            evidence_provenance_id: evidence.as_ref().map(Uuid::as_bytes),
+        };
+        if check_signature(
+            report,
+            accounts,
+            "licence assertion",
+            &id.to_string(),
+            analyst,
+            "analyst",
+            auth::LICENSE_ASSERTION_SIGNATURE_DOMAIN,
+            &auth::license_assertion_digest(&assertion),
+            &signature,
+        ) {
+            report.checked("licence assertions");
+        }
+    }
+    Ok(())
+}
+
+fn classifications(
+    tx: &mut Transaction<'_>,
+    accounts: &Accounts,
+    report: &mut Report,
+) -> Result<(), postgres::Error> {
+    let rows = tx.query(
+        "SELECT classification_id, target_type::text, target_id, label, confidence::text,
+                analyst_id, misp_universe, misp_uuid, evidence_json, signature
+           FROM catalogue.classification",
+        &[],
+    )?;
+    for row in &rows {
+        let id: Uuid = row.get(0);
+        let target_type: String = row.get(1);
+        let target: Uuid = row.get(2);
+        let label: String = row.get(3);
+        let confidence: Option<String> = row.get(4);
+        let analyst: Uuid = row.get(5);
+        let misp_universe: Option<String> = row.get(6);
+        let misp_uuid: Option<Uuid> = row.get(7);
+        let evidence: Option<String> = row.get(8);
+        let signature: Vec<u8> = row.get(9);
+        let classification = auth::Classification {
+            classification_id: id.as_bytes(),
+            analyst_id: analyst.as_bytes(),
+            target_type: &target_type,
+            target_id: target.as_bytes(),
+            label: &label,
+            confidence: confidence.as_deref(),
+            misp_universe: misp_universe.as_deref(),
+            misp_uuid: misp_uuid.as_ref().map(Uuid::as_bytes),
+            evidence_json: evidence.as_deref(),
+        };
+        if check_signature(
+            report,
+            accounts,
+            "classification",
+            &id.to_string(),
+            analyst,
+            "analyst",
+            auth::CLASSIFICATION_SIGNATURE_DOMAIN,
+            &auth::classification_digest(&classification),
+            &signature,
+        ) {
+            report.checked("classifications");
         }
     }
     Ok(())
@@ -1097,14 +1202,6 @@ fn not_checkable(tx: &mut Transaction<'_>, report: &mut Report) -> Result<(), po
         (
             "provenance (no format yet)",
             "SELECT count(*) FROM catalogue.provenance",
-        ),
-        (
-            "licence assertions (no format yet)",
-            "SELECT count(*) FROM catalogue.license_assertion",
-        ),
-        (
-            "classifications (no format yet)",
-            "SELECT count(*) FROM catalogue.classification",
         ),
         (
             "behavioural compositions (no format yet)",

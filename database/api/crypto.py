@@ -33,6 +33,10 @@ FLAG_RECORD_DOMAIN = b"RELIC:flag:v1"
 FLAG_SIGNATURE_DOMAIN = b"RELIC:flag-signature:v1"
 FLAG_RESPONSE_RECORD_DOMAIN = b"RELIC:flag-response:v1"
 FLAG_RESPONSE_SIGNATURE_DOMAIN = b"RELIC:flag-response-signature:v1"
+LICENSE_ASSERTION_RECORD_DOMAIN = b"RELIC:license-assertion:v1"
+LICENSE_ASSERTION_SIGNATURE_DOMAIN = b"RELIC:license-assertion-signature:v1"
+CLASSIFICATION_RECORD_DOMAIN = b"RELIC:classification:v1"
+CLASSIFICATION_SIGNATURE_DOMAIN = b"RELIC:classification-signature:v1"
 
 PUBLIC_KEY_BYTES = 32
 SIGNATURE_BYTES = 64
@@ -50,6 +54,10 @@ def encode_fields(domain: bytes, fields: Sequence[bytes]) -> bytes:
 
 def encode_optional(value: str | None) -> bytes:
     return b"\x00" if value is None else b"\x01" + value.encode("utf-8")
+
+
+def encode_optional_bytes(value: bytes | None) -> bytes:
+    return b"\x00" if value is None else b"\x01" + value
 
 
 def signing_message(domain: bytes, digest: bytes) -> bytes:
@@ -198,6 +206,70 @@ def flag_response_record(
             *flag._fields(),
             analyst_id.bytes,
             note.encode("utf-8"),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class LicenseAssertion:
+    """An Analyst's SPDX licence claim on one source or binary."""
+
+    license_assertion_id: UUID
+    analyst_id: UUID
+    target_type: str
+    target_id: UUID
+    spdx_expression: str
+    basis: str
+    confidence: str | None
+    evidence_provenance_id: UUID | None
+
+
+def license_assertion_record(assertion: LicenseAssertion) -> bytes:
+    return encode_fields(
+        LICENSE_ASSERTION_RECORD_DOMAIN,
+        [
+            assertion.license_assertion_id.bytes,
+            assertion.analyst_id.bytes,
+            assertion.target_type.encode("utf-8"),
+            assertion.target_id.bytes,
+            assertion.spdx_expression.encode("utf-8"),
+            assertion.basis.encode("utf-8"),
+            encode_optional(assertion.confidence),
+            encode_optional_bytes(
+                assertion.evidence_provenance_id.bytes if assertion.evidence_provenance_id else None
+            ),
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class Classification:
+    """An Analyst's label on one binary, function or behavioural composition."""
+
+    classification_id: UUID
+    analyst_id: UUID
+    target_type: str
+    target_id: UUID
+    label: str
+    confidence: str | None
+    misp_universe: str | None
+    misp_uuid: UUID | None
+    evidence_json: str | None
+
+
+def classification_record(classification: Classification) -> bytes:
+    return encode_fields(
+        CLASSIFICATION_RECORD_DOMAIN,
+        [
+            classification.classification_id.bytes,
+            classification.analyst_id.bytes,
+            classification.target_type.encode("utf-8"),
+            classification.target_id.bytes,
+            classification.label.encode("utf-8"),
+            encode_optional(classification.confidence),
+            encode_optional(classification.misp_universe),
+            encode_optional_bytes(classification.misp_uuid.bytes if classification.misp_uuid else None),
+            encode_optional(classification.evidence_json),
         ],
     )
 

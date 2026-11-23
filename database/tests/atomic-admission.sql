@@ -428,10 +428,11 @@ BEGIN
 
     INSERT INTO classification (
         target_type, target_id, label, confidence, analyst_id,
-        evidence, signature
+        evidence, evidence_json, signature
     ) VALUES (
         'behavioural_composition', composition_id_value, 'malicious', 0.9000,
-        analyst_id, '{"reason":"combined execution behaviour"}', decode(repeat('55', 64), 'hex')
+        analyst_id, '{"reason":"combined execution behaviour"}',
+        '{"reason":"combined execution behaviour"}', decode(repeat('55', 64), 'hex')
     );
 
     IF NOT target_exists('behavioural_composition', composition_id_value) THEN
