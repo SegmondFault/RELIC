@@ -88,12 +88,26 @@ Connection string (key-value form, socket, no password):
 ```bash
 export RELIC_DATABASE_URL='host=/var/run/postgresql dbname=relic user=relic_worker'
 target/release/relic-ingest-fidbf --manifest signed.json --fidbf-object object.fidbf \
-    --integrity-system-user-id "$INTEGRITY_UID" --integrity-key /etc/relic/integrity_ed25519
-target/release/relic-checkpoint-mmr --system-user-id "$MMR_UID" --key /etc/relic/mmr_ed25519
+    --integrity-system-user-id "$INTEGRITY_UID" --integrity-key /var/lib/relic/keys/integrity_ed25519
+target/release/relic-checkpoint-mmr --system-user-id "$MMR_UID" --key /var/lib/relic/keys/mmr_ed25519
 ```
 
 `relic-verify` uses `user=relic_auditor`; see `docs/workers.md` for cron.
-Keep the system keys readable only by the user that runs the workers.
+
+### System keys
+
+The integrity and MMR private keys live in `/var/lib/relic/keys`, where the
+backup (`backup/`, `RELIC_KEYS_DIR`) expects them. Only the user that runs the
+workers may read them; the backup runs as root and reads them regardless:
+
+```bash
+sudo install -d -m 0700 -o ns -g ns /var/lib/relic/keys
+sudo install -m 0600 -o ns -g ns integrity_ed25519 mmr_ed25519 /var/lib/relic/keys/
+```
+
+With a dedicated worker user (see section 1), give the directory to that user
+instead of `ns`. The API never reads these keys, and the directory is not
+mounted into any container.
 
 ## 5. Check it
 

@@ -9,6 +9,10 @@
 # database and resets the relic_app, relic_worker and relic_auditor passwords
 # to RELIC_TEST_APP_PASSWORD, RELIC_TEST_WORKER_PASSWORD and
 # RELIC_TEST_AUDITOR_PASSWORD.
+#
+# Guard: the database it creates carries a marker comment, and an existing
+# `relic` database without that marker (a real one) is never dropped: the
+# script refuses to run at all, so the role passwords stay untouched as well.
 
 set -euo pipefail
 
@@ -26,6 +30,23 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 psql_super() {
     psql --no-psqlrc -X -v ON_ERROR_STOP=1 -q "$@"
 }
+
+marker="disposable RELIC test database (database/tests/setup-disposable-db.sh)"
+
+state="$(psql_super -At -v marker="$marker" "$superuser_uri/postgres" <<'SQL'
+SELECT CASE
+    WHEN NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'relic') THEN 'absent'
+    WHEN (SELECT shobj_description(oid, 'pg_database') FROM pg_database
+           WHERE datname = 'relic') = :'marker' THEN 'disposable'
+    ELSE 'real'
+END;
+SQL
+)"
+if [[ "$state" != absent && "$state" != disposable ]]; then
+    echo "refusing: this server has a 'relic' database that this script did not create," >&2
+    echo "and it would be dropped. Use a separate, disposable PostgreSQL server." >&2
+    exit 1
+fi
 
 psql_super "$superuser_uri/postgres" <<SQL
 DROP DATABASE IF EXISTS relic WITH (FORCE);
@@ -49,6 +70,7 @@ ALTER ROLE relic_app PASSWORD '$app_password';
 ALTER ROLE relic_worker LOGIN PASSWORD '$worker_password';
 ALTER ROLE relic_auditor LOGIN PASSWORD '$auditor_password';
 CREATE DATABASE relic OWNER relic_owner;
+COMMENT ON DATABASE relic IS '$marker';
 SQL
 
 PGOPTIONS="-c role=relic_owner" psql_super "$superuser_uri/relic" \
