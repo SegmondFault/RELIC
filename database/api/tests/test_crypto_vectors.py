@@ -98,7 +98,7 @@ def test_registration_decision_vectors(case):
 def _revocation(inputs: dict) -> crypto.RevocationRequest:
     return crypto.RevocationRequest(
         revocation_id=uuid.UUID(hex=inputs["revocation_id"]),
-        analyst_id=uuid.UUID(hex=inputs["analyst_id"]),
+        requester_id=uuid.UUID(hex=inputs["requester_id"]),
         target_type=inputs["target_type"],
         target_id=uuid.UUID(hex=inputs["target_id"]),
         reason=inputs["reason"],

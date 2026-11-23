@@ -81,11 +81,12 @@ class Database:
         return User(user_id, key, role)
 
     def revoke(self, target_id: uuid.UUID, target_type: str = "user") -> None:
-        requester = self.create_user("analyst")
+        # Accounts are revoked at a Moderator's request, entries at an Analyst's.
+        requester = self.create_user("moderator" if target_type == "user" else "analyst")
         moderator = self.create_user("moderator")
         revocation_id = self.execute(
             "INSERT INTO catalogue.revocation"
-            " (analyst_request_id, target_type, target_id, reason, request_signature)"
+            " (requester_id, target_type, target_id, reason, request_signature)"
             " VALUES (%s, %s::catalogue.corpus_target_type, %s, 'test', %s) RETURNING revocation_id",
             (requester.user_id, target_type, target_id, b"\x01" * 64),
         )[0][0]

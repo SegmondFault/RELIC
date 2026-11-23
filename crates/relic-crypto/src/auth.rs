@@ -242,15 +242,17 @@ pub fn registration_decision_digest(
     ))
 }
 
-/// An Analyst's request to revoke one catalogue object or account.
+/// A request to revoke one catalogue entry (filed by an Analyst) or account
+/// (filed by a Moderator).
 ///
-/// The Analyst chooses `revocation_id` (a fresh UUID). It is the primary key
+/// The requester chooses `revocation_id` (a fresh UUID). It is the primary key
 /// of the stored row, so a signed request can be admitted at most once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RevocationRequest<'a> {
     pub revocation_id: &'a [u8; 16],
-    /// The requesting Analyst's User ID.
-    pub analyst_id: &'a [u8; 16],
+    /// The requester's User ID: an Analyst for an entry, a Moderator for an
+    /// account. The field set and encoding are unchanged from v1.
+    pub requester_id: &'a [u8; 16],
     /// A `corpus_target_type` value, e.g. `user` or `fidbf`.
     pub target_type: &'a str,
     pub target_id: &'a [u8; 16],
@@ -260,14 +262,14 @@ pub struct RevocationRequest<'a> {
 fn revocation_request_fields<'a>(request: &RevocationRequest<'a>) -> [&'a [u8]; 5] {
     [
         request.revocation_id,
-        request.analyst_id,
+        request.requester_id,
         request.target_type.as_bytes(),
         request.target_id,
         request.reason.as_bytes(),
     ]
 }
 
-/// Canonical bytes of an Analyst's revocation request.
+/// Canonical bytes of a revocation request.
 #[must_use]
 pub fn revocation_request_record(request: &RevocationRequest<'_>) -> Vec<u8> {
     encode_fields(
@@ -293,13 +295,13 @@ pub fn revocation_decision_record(
     moderator_id: &[u8; 16],
     decision: RevocationDecision,
 ) -> Vec<u8> {
-    let [revocation_id, analyst_id, target_type, target_id, reason] =
+    let [revocation_id, requester_id, target_type, target_id, reason] =
         revocation_request_fields(request);
     encode_fields(
         REVOCATION_DECISION_RECORD_DOMAIN,
         &[
             revocation_id,
-            analyst_id,
+            requester_id,
             target_type,
             target_id,
             reason,

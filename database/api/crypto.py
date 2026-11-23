@@ -146,10 +146,10 @@ def registration_decision_record(
 
 @dataclass(frozen=True)
 class RevocationRequest:
-    """An Analyst's request to revoke one catalogue object or account."""
+    """A request to revoke a catalogue entry (an Analyst's) or an account (a Moderator's)."""
 
     revocation_id: UUID
-    analyst_id: UUID
+    requester_id: UUID
     target_type: str
     target_id: UUID
     reason: str
@@ -157,7 +157,7 @@ class RevocationRequest:
     def _fields(self) -> list[bytes]:
         return [
             self.revocation_id.bytes,
-            self.analyst_id.bytes,
+            self.requester_id.bytes,
             self.target_type.encode("utf-8"),
             self.target_id.bytes,
             self.reason.encode("utf-8"),

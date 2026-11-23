@@ -408,7 +408,7 @@ fn revocations(
            FROM catalogue.revocation_approval",
     )?;
     let rows = tx.query(
-        "SELECT revocation_id, analyst_request_id, target_type::text, target_id, reason,
+        "SELECT revocation_id, requester_id, target_type::text, target_id, reason,
                 request_signature, moderator_id, decision::text, decision_signature
            FROM catalogue.revocation",
         &[],
@@ -416,13 +416,19 @@ fn revocations(
     for row in &rows {
         let id: Uuid = row.get(0);
         let id_text = id.to_string();
-        let analyst: Uuid = row.get(1);
+        let requester: Uuid = row.get(1);
         let target_type: String = row.get(2);
         let target: Uuid = row.get(3);
         let reason: String = row.get(4);
+        // Accounts are revoked at a Moderator's request, entries at an Analyst's.
+        let requester_role = if target_type == "user" {
+            "moderator"
+        } else {
+            "analyst"
+        };
         let request = auth::RevocationRequest {
             revocation_id: id.as_bytes(),
-            analyst_id: analyst.as_bytes(),
+            requester_id: requester.as_bytes(),
             target_type: &target_type,
             target_id: target.as_bytes(),
             reason: &reason,
@@ -433,8 +439,8 @@ fn revocations(
             accounts,
             KIND,
             &id_text,
-            analyst,
-            "analyst",
+            requester,
+            requester_role,
             auth::REVOCATION_REQUEST_SIGNATURE_DOMAIN,
             &auth::revocation_request_digest(&request),
             &signature,

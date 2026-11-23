@@ -416,6 +416,13 @@ CREATE UNIQUE INDEX revocation_open_target_idx
 -- never be decided, and the one-open-request rule below would block its
 -- target for good. The requester is checked once, when the request is filed;
 -- the deciding Moderator is checked whenever a decision is recorded.
+-- The requester can be an Analyst (for a catalogue entry) or a Moderator (for
+-- an account), so the column is no longer named after Analysts.
+ALTER TABLE revocation RENAME COLUMN analyst_request_id TO requester_id;
+
+-- Analysts request revocation of catalogue entries; Moderators revoke
+-- accounts. An Analyst cannot open a case against an account (they flag it
+-- instead, or a Moderator acts), and a Moderator cannot target their own.
 CREATE OR REPLACE FUNCTION validate_revocation_actors()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -424,20 +431,27 @@ AS $$
 DECLARE
     requester_role account_role;
     requester_owner account_owner_type;
+    expected_role account_role;
     moderator_role account_role;
     moderator_owner account_owner_type;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        expected_role := CASE WHEN NEW.target_type = 'user'
+                              THEN 'moderator' ELSE 'analyst' END;
         SELECT role, owner_type
           INTO requester_role, requester_owner
           FROM user_public
-         WHERE user_id = NEW.analyst_request_id;
+         WHERE user_id = NEW.requester_id;
 
         IF NOT FOUND
            OR requester_owner <> 'human'
-           OR requester_role <> 'analyst'
-           OR account_is_revoked(NEW.analyst_request_id) THEN
-            RAISE EXCEPTION 'Revocation requester must be an active Analyst'
+           OR requester_role IS DISTINCT FROM expected_role
+           OR account_is_revoked(NEW.requester_id) THEN
+            RAISE EXCEPTION 'Accounts are revoked at an active Moderator''s request, catalogue entries at an active Analyst''s'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        IF NEW.target_type = 'user' AND NEW.target_id = NEW.requester_id THEN
+            RAISE EXCEPTION 'A Moderator cannot request the revocation of their own account'
                 USING ERRCODE = 'insufficient_privilege';
         END IF;
     END IF;
@@ -515,7 +529,7 @@ BEGIN
     END IF;
 
     IF NEW.revocation_id <> OLD.revocation_id
-       OR NEW.analyst_request_id <> OLD.analyst_request_id
+       OR NEW.requester_id <> OLD.requester_id
        OR NEW.target_type <> OLD.target_type
        OR NEW.target_id <> OLD.target_id
        OR NEW.reason <> OLD.reason
@@ -994,8 +1008,8 @@ FOR EACH ROW EXECUTE FUNCTION guard_submission();
 -- ---------------------------------------------------------------------------
 
 -- One Moderator alone could otherwise approve a new Moderator (including a
--- second key of their own) and, with any Analyst account, revoke the other
--- Moderators. Approving a Moderator registration and approving the
+-- second key of their own) and revoke the other Moderators (Moderators file
+-- account revocations, and may decide their own requests). Approving a Moderator registration and approving the
 -- revocation of a Moderator account therefore need two different, active
 -- Moderators: the first approval is stored here with its signature, the
 -- second is the final decision on the request row. Each Moderator signs the

@@ -82,8 +82,10 @@ def test_genuine_rows_verify_and_forgeries_are_reported(client, database, tmp_pa
     assert _approve(client, moderators[0], moderator_request).status_code == 202
     assert _approve(client, moderators[1], moderator_request).status_code == 200
 
+    # Accounts are revoked at a Moderator's request.
     revocation = client.post(
-        "/v1/revocations", json=revocation_request(analyst, viewer.user_id), headers=analyst_headers
+        "/v1/revocations", json=revocation_request(moderators[0], viewer.user_id),
+        headers=bearer(login(client, moderators[0])),
     ).json()
     decided = client.post(
         f"/v1/revocations/{revocation['revocation_id']}/decision",
@@ -129,9 +131,9 @@ def test_genuine_rows_verify_and_forgeries_are_reported(client, database, tmp_pa
             (forged_flag, viewer.user_id, b"\x07" * 64, moderators[0].user_id),
         )
         conn.execute(
-            "INSERT INTO catalogue.revocation (revocation_id, analyst_request_id, target_type,"
+            "INSERT INTO catalogue.revocation (revocation_id, requester_id, target_type,"
             " target_id, reason, request_signature) VALUES (%s, %s, 'user', %s, 'forged', %s)",
-            (forged_revocation, analyst.user_id, moderators[0].user_id, b"\x08" * 64),
+            (forged_revocation, moderators[1].user_id, analyst.user_id, b"\x08" * 64),
         )
         conn.execute(
             "SELECT catalogue.decide_registration(%s, %s, 'approved', %s)",

@@ -78,18 +78,18 @@ fn revocation_vectors(
     moderator_seed: [u8; 32],
 ) -> (Vec<Value>, Vec<Value>) {
     let revocation_id = *b"\x5b\x1f\x0c\x93\x2e\x64\x4a\x0d\xb1\x7c\x08\xe2\x55\x3d\x91\xa4";
-    let analyst_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
+    let requester_id = *b"\x74\x4a\xb7\x4c\xf1\xd6\x42\x1a\xa4\x17\x60\x30\xef\x9e\x86\x06";
     let target_id = *b"\xc2\x48\x6a\x1e\x90\x3b\x4d\x75\x8f\x26\xe0\x14\x7d\xb9\x52\x0f";
     let revocation = auth::RevocationRequest {
         revocation_id: &revocation_id,
-        analyst_id: &analyst_id,
+        requester_id: &requester_id,
         target_type: "user",
         target_id: &target_id,
         reason: "Key reported lost — Schlüssel verloren",
     };
     let revocation_json = json!({
         "revocation_id": hex(&revocation_id),
-        "analyst_id": hex(&analyst_id),
+        "requester_id": hex(&requester_id),
         "target_type": revocation.target_type,
         "target_id": hex(&target_id),
         "reason": revocation.reason,

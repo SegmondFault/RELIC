@@ -1,8 +1,11 @@
-"""Revocation requests (Analysts) and signed, final decisions (Moderators).
+"""Revocation requests and signed, final decisions (Moderators).
 
-Nothing is deleted: an approved revocation marks its target revoked. For
-``target_type = user`` the account loses access immediately, because every
-request re-reads the account.
+Analysts request revocation of catalogue entries; Moderators file revocations
+of accounts (``target_type = user``) and decide every request, their own
+included. Revoking a Moderator account needs two different Moderators.
+
+Nothing is deleted: an approved revocation marks its target revoked. For an
+account, access ends immediately, because every request re-reads the account.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from ..schemas import (
     TargetType,
 )
 
-AnalystDep = Annotated[Identity, Depends(require_roles("analyst"))]
+RequesterDep = Annotated[Identity, Depends(require_roles("analyst", "moderator"))]
 ModeratorDep = Annotated[Identity, Depends(require_roles("moderator"))]
 
 # Reading revocations needs any active account; writing needs the route's role.
@@ -44,7 +47,7 @@ audit = logging.getLogger("relic.audit")
 _COLUMNS = """
     revocation_id,
     coalesce(decision::text, 'pending') AS status,
-    analyst_request_id AS analyst_id,
+    requester_id,
     target_type::text AS target_type,
     target_id, reason, requested_at,
     encode(request_signature, 'hex') AS request_signature,
@@ -56,7 +59,7 @@ _COLUMNS = """
 
 _INSERT = f"""
     INSERT INTO catalogue.revocation
-        (revocation_id, analyst_request_id, target_type, target_id, reason, request_signature)
+        (revocation_id, requester_id, target_type, target_id, reason, request_signature)
     VALUES (%s, %s, %s::catalogue.corpus_target_type, %s, %s, %s)
     RETURNING {_COLUMNS}
 """
@@ -107,21 +110,34 @@ async def get_revocation(revocation_id: UUID, conn: ConnDep):
 async def request_revocation(
     body: RevocationRequest,
     response: Response,
-    analyst: AnalystDep,
+    requester: RequesterDep,
     conn: ConnDep,
 ):
-    """Request revocation of one catalogue object or account (signed).
+    """Request revocation of a catalogue entry (Analysts) or an account (Moderators), signed.
 
-    ``revocation_id`` is chosen by the Analyst and signed, so a request can be
-    stored once. An identical retry returns the stored request with ``200``;
-    the same ID with different content is ``409``.
+    ``revocation_id`` is chosen by the requester and signed, so a request can
+    be stored once. An identical retry returns the stored request with
+    ``200``; the same ID with different content is ``409``. ``403`` for an
+    Analyst targeting an account, a Moderator targeting an entry or their own
+    account, or a bad signature.
     """
-    if body.analyst_id != analyst.user_id:
-        raise HTTPException(status_code=403, detail="analyst_id must be the authenticated account")
+    if body.requester_id != requester.user_id:
+        raise HTTPException(status_code=403, detail="requester_id must be the authenticated account")
+    if (body.target_type == "user") != (requester.role == "moderator"):
+        raise HTTPException(
+            status_code=403,
+            detail="Accounts are revoked by Moderators; Analysts request revocation of catalogue entries"
+            if requester.role == "analyst"
+            else "Moderators file revocations of accounts; Analysts request them for catalogue entries",
+        )
+    if body.target_type == "user" and body.target_id == requester.user_id:
+        raise HTTPException(
+            status_code=403, detail="A Moderator cannot request the revocation of their own account"
+        )
 
     request = SignedRevocation(
         revocation_id=body.revocation_id,
-        analyst_id=body.analyst_id,
+        requester_id=body.requester_id,
         target_type=body.target_type,
         target_id=body.target_id,
         reason=body.reason,
@@ -130,12 +146,12 @@ async def request_revocation(
 
     async with conn.transaction():
         # The key registered for the claimed User ID, never one from the request.
-        key = await registered_key(conn, body.analyst_id)
+        key = await registered_key(conn, body.requester_id)
         if not verify(key, REVOCATION_REQUEST_SIGNATURE_DOMAIN, revocation_request_record(request), signature):
             audit.warning(
-                "revocation request signature rejected id=%s analyst=%s",
+                "revocation request signature rejected id=%s requester=%s",
                 body.revocation_id,
-                body.analyst_id,
+                body.requester_id,
             )
             raise HTTPException(status_code=403, detail="Request signature rejected")
 
@@ -146,25 +162,25 @@ async def request_revocation(
         existing = await cur.fetchone()
         if existing is not None:
             if existing["request_signature"] == body.signature and (
-                existing["analyst_id"],
+                existing["requester_id"],
                 existing["target_type"],
                 existing["target_id"],
                 existing["reason"],
-            ) == (body.analyst_id, body.target_type, body.target_id, body.reason):
+            ) == (body.requester_id, body.target_type, body.target_id, body.reason):
                 response.status_code = 200
                 return existing
             raise HTTPException(
                 status_code=409, detail="revocation_id is already used for a different request"
             )
 
-        # The database re-checks that the requester is an active Analyst and
+        # The database re-checks the requester's role for the target type and
         # that the target exists (422 via the global handler otherwise).
         try:
             cur = await conn.execute(
                 _INSERT,
                 (
                     body.revocation_id,
-                    body.analyst_id,
+                    body.requester_id,
                     body.target_type,
                     body.target_id,
                     body.reason,
@@ -182,11 +198,11 @@ async def request_revocation(
         row = await cur.fetchone()
 
     audit.info(
-        "revocation requested id=%s target=%s:%s analyst=%s",
+        "revocation requested id=%s target=%s:%s requester=%s",
         body.revocation_id,
         body.target_type,
         body.target_id,
-        body.analyst_id,
+        body.requester_id,
     )
     return row
 
@@ -218,7 +234,7 @@ async def decide_revocation(
     async with conn.transaction():
         await _approvals.lock(conn, "revocation", revocation_id)
         cur = await conn.execute(
-            """SELECT analyst_request_id, target_type::text AS target_type, target_id, reason,
+            """SELECT requester_id, target_type::text AS target_type, target_id, reason,
                       decision,
                       catalogue.target_is_moderator(target_type, target_id) AS target_is_moderator
                  FROM catalogue.revocation
@@ -238,7 +254,7 @@ async def decide_revocation(
 
         request = SignedRevocation(
             revocation_id=revocation_id,
-            analyst_id=stored["analyst_request_id"],
+            requester_id=stored["requester_id"],
             target_type=stored["target_type"],
             target_id=stored["target_id"],
             reason=stored["reason"],

@@ -12,6 +12,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import psycopg
 import pytest
 from nacl.signing import SigningKey
 
@@ -34,7 +35,7 @@ def bearer(token: str) -> dict:
 
 
 def request_body(
-    analyst: User,
+    requester: User,
     target_id: uuid.UUID,
     *,
     target_type: str = "user",
@@ -44,17 +45,17 @@ def request_body(
     domain: bytes = REVOCATION_REQUEST_SIGNATURE_DOMAIN,
     **signed_overrides,
 ) -> dict:
-    """A request as ``analyst`` would send it; ``signed_overrides`` change only what is signed."""
+    """A request as ``requester`` would send it; ``signed_overrides`` change only what is signed."""
     fields = {
         "revocation_id": revocation_id or uuid.uuid4(),
-        "analyst_id": analyst.user_id,
+        "requester_id": requester.user_id,
         "target_type": target_type,
         "target_id": target_id,
         "reason": reason,
     }
     record = revocation_request_record(RevocationRequest(**{**fields, **signed_overrides}))
     body = {key: str(value) for key, value in fields.items()}
-    body["signature"] = sign(signer or analyst.key, domain, record)
+    body["signature"] = sign(signer or requester.key, domain, record)
     return body
 
 
@@ -74,7 +75,7 @@ def decision_body(
     record = revocation_decision_record(
         RevocationRequest(
             revocation_id=uuid.UUID(details["revocation_id"]),
-            analyst_id=uuid.UUID(details["analyst_id"]),
+            requester_id=uuid.UUID(details["requester_id"]),
             target_type=details["target_type"],
             target_id=uuid.UUID(details["target_id"]),
             reason=details["reason"],
@@ -90,13 +91,14 @@ def decision_body(
 
 
 @pytest.fixture
-def analyst(database) -> User:
-    return database.create_user("analyst")
+def requester(database) -> User:
+    """The Moderator who files an account revocation."""
+    return database.create_user("moderator")
 
 
 @pytest.fixture
-def analyst_headers(client, analyst) -> dict:
-    return bearer(login(client, analyst))
+def requester_headers(client, requester) -> dict:
+    return bearer(login(client, requester))
 
 
 @pytest.fixture
@@ -115,10 +117,10 @@ def target(database) -> User:
 
 
 @pytest.fixture
-def pending(client, analyst, analyst_headers, target) -> dict:
+def pending(client, requester, requester_headers, target) -> dict:
     """A stored, pending revocation of ``target``'s account."""
     response = client.post(
-        "/v1/revocations", json=request_body(analyst, target.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, target.user_id), headers=requester_headers
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -148,10 +150,10 @@ def _state(database, revocation_id) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-def test_analyst_requests_and_any_account_can_read(client, database, pending, analyst, target):
+def test_moderator_files_and_any_account_can_read(client, database, pending, requester, target):
     assert pending["status"] == "pending"
-    assert (pending["analyst_id"], pending["target_id"]) == (
-        str(analyst.user_id),
+    assert (pending["requester_id"], pending["target_id"]) == (
+        str(requester.user_id),
         str(target.user_id),
     )
     assert pending["moderator_id"] is None and pending["decision_signature"] is None
@@ -168,37 +170,37 @@ def test_analyst_requests_and_any_account_can_read(client, database, pending, an
     assert client.get("/v1/revocations").status_code == 401
 
 
-def test_stored_request_signature_verifies_offline(pending, analyst):
+def test_stored_request_signature_verifies_offline(pending, requester):
     record = revocation_request_record(
         RevocationRequest(
             revocation_id=uuid.UUID(pending["revocation_id"]),
-            analyst_id=uuid.UUID(pending["analyst_id"]),
+            requester_id=uuid.UUID(pending["requester_id"]),
             target_type=pending["target_type"],
             target_id=uuid.UUID(pending["target_id"]),
             reason=pending["reason"],
         )
     )
     assert verify(
-        bytes(analyst.key.verify_key),
+        bytes(requester.key.verify_key),
         REVOCATION_REQUEST_SIGNATURE_DOMAIN,
         record,
         bytes.fromhex(pending["request_signature"]),
     )
 
 
-def test_identical_retry_returns_the_stored_request(client, database, analyst, analyst_headers, target):
-    body = request_body(analyst, target.user_id)
-    first = client.post("/v1/revocations", json=body, headers=analyst_headers)
-    again = client.post("/v1/revocations", json=body, headers=analyst_headers)
+def test_identical_retry_returns_the_stored_request(client, database, requester, requester_headers, target):
+    body = request_body(requester, target.user_id)
+    first = client.post("/v1/revocations", json=body, headers=requester_headers)
+    again = client.post("/v1/revocations", json=body, headers=requester_headers)
     assert (first.status_code, again.status_code) == (201, 200)
     assert again.json() == first.json()
     assert _count(database, target.user_id) == 1
 
 
-def test_reused_id_with_different_content_conflicts(client, analyst, analyst_headers, pending, database):
+def test_reused_id_with_different_content_conflicts(client, requester, requester_headers, pending, database):
     other = database.create_user("viewer")
-    body = request_body(analyst, other.user_id, revocation_id=uuid.UUID(pending["revocation_id"]))
-    response = client.post("/v1/revocations", json=body, headers=analyst_headers)
+    body = request_body(requester, other.user_id, revocation_id=uuid.UUID(pending["revocation_id"]))
+    response = client.post("/v1/revocations", json=body, headers=requester_headers)
     assert response.status_code == 409
     assert _count(database, other.user_id) == 0
 
@@ -215,71 +217,156 @@ def test_reused_id_with_different_content_conflicts(client, analyst, analyst_hea
         "registration_domain",
     ],
 )
-def test_forged_requests_are_rejected_without_change(client, database, analyst, analyst_headers, target, case):
-    other = database.create_user("analyst")
+def test_forged_requests_are_rejected_without_change(client, database, requester, requester_headers, target, case):
+    other = database.create_user("moderator")
     body = {
-        "another_key": lambda: request_body(analyst, target.user_id, signer=SigningKey.generate()),
-        # Claims another Analyst's User ID, signed by the caller.
+        "another_key": lambda: request_body(requester, target.user_id, signer=SigningKey.generate()),
+        # Claims another Moderator's User ID, signed by the caller.
         "another_users_id": lambda: {
-            **request_body(analyst, target.user_id, analyst_id=other.user_id),
-            "analyst_id": str(other.user_id),
+            **request_body(requester, target.user_id, requester_id=other.user_id),
+            "requester_id": str(other.user_id),
         },
-        # A request genuinely signed by another Analyst, replayed by the caller.
+        # A request genuinely signed by another Moderator, replayed by the caller.
         "another_users_signed_request": lambda: request_body(other, target.user_id),
-        "altered_reason": lambda: request_body(analyst, target.user_id, reason="Signed reason")
+        "altered_reason": lambda: request_body(requester, target.user_id, reason="Signed reason")
         | {"reason": "Sent reason"},
         # Signed for another target, sent for this one.
-        "altered_target": lambda: request_body(analyst, database.create_user("viewer").user_id)
+        "altered_target": lambda: request_body(requester, database.create_user("viewer").user_id)
         | {"target_id": str(target.user_id)},
         "decision_domain": lambda: request_body(
-            analyst, target.user_id, domain=REVOCATION_DECISION_SIGNATURE_DOMAIN
+            requester, target.user_id, domain=REVOCATION_DECISION_SIGNATURE_DOMAIN
         ),
         "registration_domain": lambda: request_body(
-            analyst, target.user_id, domain=REGISTRATION_DECISION_SIGNATURE_DOMAIN
+            requester, target.user_id, domain=REGISTRATION_DECISION_SIGNATURE_DOMAIN
         ),
     }[case]()
-    response = client.post("/v1/revocations", json=body, headers=analyst_headers)
+    response = client.post("/v1/revocations", json=body, headers=requester_headers)
     assert response.status_code == 403, response.text
     assert _count(database, target.user_id) == 0
 
 
-@pytest.mark.parametrize("role", ["viewer", "moderator"])
-def test_only_analysts_can_request(client, database, target, role):
+@pytest.mark.parametrize(
+    "role, target_type, allowed",
+    [
+        ("moderator", "user", True),
+        ("analyst", "user", False),   # Analysts flag accounts; Moderators revoke them
+        ("viewer", "user", False),
+        ("analyst", "source", True),
+        ("moderator", "source", False),  # entries need an Analyst's request
+        ("viewer", "source", False),
+    ],
+)
+def test_accounts_by_moderators_entries_by_analysts(client, database, role, target_type, allowed):
     user = database.create_user(role)
+    if target_type == "user":
+        target_id = database.create_user("viewer").user_id
+    else:
+        target_id = uuid.uuid4()
+        database.execute(
+            "INSERT INTO catalogue.source (source_id, name, source_type, retrieved_at,"
+            " submitted_by_analyst_id, signature) VALUES (%s, 'x', 'FIDBF', clock_timestamp(), %s, %s)",
+            (target_id, database.create_user("analyst").user_id, b"\x11" * 64),
+        )
     response = client.post(
         "/v1/revocations",
-        json=request_body(user, target.user_id),
+        json=request_body(user, target_id, target_type=target_type),
         headers=bearer(login(client, user)),
     )
-    assert response.status_code == 403
-    assert _count(database, target.user_id) == 0
+    assert response.status_code == (201 if allowed else 403), response.text
+    assert _count(database, target_id) == (1 if allowed else 0)
 
 
-def test_revoked_analyst_cannot_request(client, database, analyst, analyst_headers, target):
-    database.revoke(analyst.user_id)
+def test_database_enforces_who_requests_what(database):
+    """Even the API's own login cannot file a request with the wrong requester."""
+    analyst, viewer = database.create_user("analyst"), database.create_user("viewer")
+    with psycopg.connect(database.app_url, autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="Moderator"):
+            conn.execute(
+                "INSERT INTO catalogue.revocation (requester_id, target_type, target_id, reason,"
+                " request_signature) VALUES (%s, 'user', %s, 'x', %s)",
+                (analyst.user_id, viewer.user_id, b"\x01" * 64),
+            )
+    moderator = database.create_user("moderator")
+    with psycopg.connect(database.app_url, autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="own account"):
+            conn.execute(
+                "INSERT INTO catalogue.revocation (requester_id, target_type, target_id, reason,"
+                " request_signature) VALUES (%s, 'user', %s, 'x', %s)",
+                (moderator.user_id, moderator.user_id, b"\x01" * 64),
+            )
+
+
+def test_moderator_cannot_file_against_own_account(client, requester, requester_headers):
     response = client.post(
-        "/v1/revocations", json=request_body(analyst, target.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, requester.user_id),
+        headers=requester_headers,
+    )
+    assert response.status_code == 403 and "own account" in response.json()["detail"]
+
+
+def test_one_moderator_files_and_decides_a_viewer_or_analyst(
+    client, database, requester, requester_headers
+):
+    for role in ("viewer", "analyst"):
+        target = database.create_user(role)
+        stored = client.post(
+            "/v1/revocations", json=request_body(requester, target.user_id),
+            headers=requester_headers,
+        ).json()
+        decided = _decide(client, requester_headers, stored, decision_body(stored, requester))
+        assert decided.status_code == 200, decided.text
+        assert client.post("/v1/auth/login", json=login_body(client, target)).status_code == 403
+
+
+def test_revoking_a_moderator_still_needs_a_second_moderator(
+    client, database, requester, requester_headers
+):
+    target = database.create_user("moderator")
+    stored = client.post(
+        "/v1/revocations", json=request_body(requester, target.user_id),
+        headers=requester_headers,
+    ).json()
+    first = _decide(client, requester_headers, stored, decision_body(stored, requester))
+    assert first.status_code == 202, first.text
+    again = _decide(client, requester_headers, stored, decision_body(stored, requester))
+    assert again.status_code == 409  # the same Moderator cannot be the second
+    second = database.create_user("moderator")
+    final = _decide(client, bearer(login(client, second)), stored, decision_body(stored, second))
+    assert final.status_code == 200, final.text
+    assert client.post("/v1/auth/login", json=login_body(client, target)).status_code == 403
+
+
+def test_revoked_analyst_cannot_request(client, database, requester, requester_headers, target):
+    database.revoke(requester.user_id)
+    response = client.post(
+        "/v1/revocations", json=request_body(requester, target.user_id), headers=requester_headers
     )
     assert response.status_code == 401
     assert _count(database, target.user_id) == 0
 
 
-def test_unknown_target_is_rejected(client, analyst, analyst_headers):
-    for target_type in ("user", "fidbf"):
-        response = client.post(
-            "/v1/revocations",
-            json=request_body(analyst, uuid.uuid4(), target_type=target_type),
-            headers=analyst_headers,
-        )
-        assert response.status_code == 422, response.text
-
-
-def test_one_open_request_per_target(client, database, analyst_headers, pending, target):
-    second_analyst = database.create_user("analyst")
+def test_unknown_target_is_rejected(client, database, requester, requester_headers):
     response = client.post(
         "/v1/revocations",
-        json=request_body(second_analyst, target.user_id),
-        headers=bearer(login(client, second_analyst)),
+        json=request_body(requester, uuid.uuid4(), target_type="user"),
+        headers=requester_headers,
+    )
+    assert response.status_code == 422, response.text
+    analyst = database.create_user("analyst")
+    response = client.post(
+        "/v1/revocations",
+        json=request_body(analyst, uuid.uuid4(), target_type="fidbf"),
+        headers=bearer(login(client, analyst)),
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_one_open_request_per_target(client, database, requester_headers, pending, target):
+    second = database.create_user("moderator")
+    response = client.post(
+        "/v1/revocations",
+        json=request_body(second, target.user_id),
+        headers=bearer(login(client, second)),
     )
     assert response.status_code == 409
     assert response.json()["detail"] == "This target already has an open revocation request"
@@ -298,10 +385,10 @@ def test_one_open_request_per_target(client, database, analyst_headers, pending,
         ("unexpected", "field"),
     ],
 )
-def test_malformed_requests_are_rejected(client, analyst, analyst_headers, target, field, value):
-    body = request_body(analyst, target.user_id)
+def test_malformed_requests_are_rejected(client, requester, requester_headers, target, field, value):
+    body = request_body(requester, target.user_id)
     body[field] = value
-    assert client.post("/v1/revocations", json=body, headers=analyst_headers).status_code == 422
+    assert client.post("/v1/revocations", json=body, headers=requester_headers).status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +418,7 @@ def test_approved_account_revocation_takes_effect_immediately(
     record = revocation_decision_record(
         RevocationRequest(
             revocation_id=uuid.UUID(stored["revocation_id"]),
-            analyst_id=uuid.UUID(stored["analyst_id"]),
+            requester_id=uuid.UUID(stored["requester_id"]),
             target_type=stored["target_type"],
             target_id=uuid.UUID(stored["target_id"]),
             reason=stored["reason"],
@@ -347,23 +434,23 @@ def test_approved_account_revocation_takes_effect_immediately(
     )
 
 
-def test_revoked_target_cannot_be_requested_again(client, database, analyst, analyst_headers, pending, moderator, moderator_headers, target):
+def test_revoked_target_cannot_be_requested_again(client, database, requester, requester_headers, pending, moderator, moderator_headers, target):
     assert _decide(client, moderator_headers, pending, decision_body(pending, moderator)).status_code == 200
     response = client.post(
-        "/v1/revocations", json=request_body(analyst, target.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, target.user_id), headers=requester_headers
     )
     assert response.status_code == 409
     assert "already revoked" in response.json()["detail"]
 
 
 def test_rejection_leaves_the_target_active_and_allows_a_new_request(
-    client, analyst, analyst_headers, pending, moderator, moderator_headers, target
+    client, requester, requester_headers, pending, moderator, moderator_headers, target
 ):
     response = _decide(client, moderator_headers, pending, decision_body(pending, moderator, "rejected"))
     assert response.status_code == 200, response.text
     assert client.get("/v1/me", headers=bearer(login(client, target))).status_code == 200
     again = client.post(
-        "/v1/revocations", json=request_body(analyst, target.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, target.user_id), headers=requester_headers
     )
     assert again.status_code == 201
 
@@ -415,9 +502,9 @@ def test_only_moderators_can_decide(client, database, pending, role):
     assert _state(database, pending["revocation_id"]) == (None, None)
 
 
-def test_moderator_cannot_decide_own_revocation(client, database, analyst, analyst_headers, moderator, moderator_headers):
+def test_moderator_cannot_decide_own_revocation(client, database, requester, requester_headers, moderator, moderator_headers):
     stored = client.post(
-        "/v1/revocations", json=request_body(analyst, moderator.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, moderator.user_id), headers=requester_headers
     ).json()
     for decision in ("approved", "rejected"):
         response = _decide(client, moderator_headers, stored, decision_body(stored, moderator, decision))
@@ -446,21 +533,21 @@ def test_unknown_revocation_is_404(client, moderator, moderator_headers, pending
 
 
 def test_request_stays_decidable_after_its_requester_is_revoked(
-    client, database, pending, analyst, moderator, moderator_headers, target
+    client, database, pending, requester, moderator, moderator_headers, target
 ):
     """Otherwise revoking the requester would block the target for good."""
-    database.revoke(analyst.user_id)
+    database.revoke(requester.user_id)
     response = _decide(client, moderator_headers, pending, decision_body(pending, moderator))
     assert response.status_code == 200, response.text
     assert client.post("/v1/auth/login", json=login_body(client, target)).status_code == 403
 
 
 def test_system_accounts_cannot_be_revoked_through_the_api(
-    client, database, analyst, analyst_headers
+    client, database, requester, requester_headers
 ):
     system = database.create_user(None, owner_type="system")
     response = client.post(
-        "/v1/revocations", json=request_body(analyst, system.user_id), headers=analyst_headers
+        "/v1/revocations", json=request_body(requester, system.user_id), headers=requester_headers
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "System accounts can only be revoked by the database operator"
@@ -495,17 +582,17 @@ def _signer(*args: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.skipif(not SIGNER.exists(), reason="build with: cargo build -p relic-ingest")
 def test_rust_client_revocation(client, database, target, tmp_path: Path):
-    analyst_id, analyst_key = _ssh_user(database, tmp_path, "analyst_ed25519", "analyst")
+    analyst_id, analyst_key = _ssh_user(database, tmp_path, "filer_ed25519", "moderator")
     moderator_id, moderator_key = _ssh_user(database, tmp_path, "moderator_ed25519", "moderator")
-    analyst_headers = bearer(_login_with_cli(client, analyst_id, analyst_key, tmp_path))
+    requester_headers = bearer(_login_with_cli(client, analyst_id, analyst_key, tmp_path))
     moderator_headers = bearer(_login_with_cli(client, moderator_id, moderator_key, tmp_path))
 
     body = _cli(
-        "request-revocation", "--analyst-id", str(analyst_id), "--target-type", "user",
+        "request-revocation", "--requester-id", str(analyst_id), "--target-type", "user",
         "--target-id", str(target.user_id), "--reason", "Schlüssel verloren — key lost",
         "--key", str(analyst_key),
     )
-    created = client.post("/v1/revocations", json=body, headers=analyst_headers)
+    created = client.post("/v1/revocations", json=body, headers=requester_headers)
     assert created.status_code == 201, created.text
     revocation_id = created.json()["revocation_id"]
 
@@ -525,7 +612,7 @@ def test_rust_client_revocation(client, database, target, tmp_path: Path):
     signed = _signer(*decide, "--requester", str(requester_path), "--target", str(target_path))
     assert signed.returncode == 0, signed.stderr
     # The Moderator saw the verified requester and the target before signing.
-    assert f"verified: signed by {analyst_id} (analyst" in signed.stderr
+    assert f"verified: signed by {analyst_id} (moderator" in signed.stderr
     assert f'"user_id": "{target.user_id}"' in signed.stderr
     decided = client.post(
         f"/v1/revocations/{revocation_id}/decision",
@@ -543,7 +630,7 @@ def test_rust_client_revocation(client, database, target, tmp_path: Path):
 
 @pytest.mark.skipif(not SIGNER.exists(), reason="build with: cargo build -p relic-ingest")
 def test_rust_client_refuses_unverified_or_unseen_requests(
-    client, database, analyst, analyst_headers, pending, target, tmp_path: Path
+    client, database, requester, requester_headers, pending, target, tmp_path: Path
 ):
     moderator_id, moderator_key = _ssh_user(database, tmp_path, "moderator_ed25519", "moderator")
     headers = bearer(_login_with_cli(client, moderator_id, moderator_key, tmp_path))
@@ -555,7 +642,7 @@ def test_rust_client_refuses_unverified_or_unseen_requests(
         return str(path)
 
     request = get(f"/v1/revocations/{pending['revocation_id']}")
-    requester = get(f"/v1/users/{analyst.user_id}")
+    requester = get(f"/v1/users/{requester.user_id}")
     shown = get(f"/v1/users/{target.user_id}")
     other_user = get(f"/v1/users/{database.create_user('viewer').user_id}")
 
@@ -581,6 +668,9 @@ def test_rust_client_refuses_unverified_or_unseen_requests(
                       "does not verify"),
         "other requester": (decide(request, other_user, shown), "requester file is for"),
         "target not shown": (decide(request, requester, None), "pass --target"),
+        # The requester file names the right account but the wrong role.
+        "wrong role": (decide(request, {**requester, "role": "analyst"}, shown),
+                       "must be requested by a moderator"),
         "wrong target": (decide(request, requester, other_user), "target file is not user"),
     }
     for name, (result, message) in cases.items():

@@ -582,3 +582,168 @@ def test_transfers_hold_no_pooled_connection(client, database, object_dirs, setu
     assert client.get(f"/v1/fidbf/{fidbf.ids['fidbf']}/download",
                       headers=setup.headers).content == fidbf.data
     assert seen == {"upload": 0, "download": 0}
+
+
+# ---------------------------------------------------------------------------
+# The handoff's negative acceptance tests, for FIDBF, BSim and provenance
+# ---------------------------------------------------------------------------
+#
+# BSim and provenance submissions are built here, mirroring the Rust record
+# format (relic_ingest::objects), so a test can sign the exact record under
+# the wrong domain or by the wrong user. A positive control shows the mirror
+# is faithful: relic-admit admits what it builds.
+
+from api.crypto import encode_fields, encode_optional  # noqa: E402
+
+from .conftest import User, login, sign  # noqa: E402
+
+BSIM_RECORD = b"RELIC:analyst-bsim:v1"
+BSIM_SIGNATURE = b"RELIC:analyst-bsim-signature:v1"
+PROVENANCE_RECORD = b"RELIC:analyst-provenance:v1"
+PROVENANCE_SIGNATURE = b"RELIC:analyst-provenance-signature:v1"
+
+
+def _text_digests(text: str) -> tuple[bytes, bytes]:
+    data = text.encode()
+    return hashlib.sha256(data).hexdigest().encode(), hashlib.md5(data).hexdigest().encode()
+
+
+def _optional_id(value: uuid.UUID | None) -> bytes:
+    return b"\x00" if value is None else b"\x01" + value.bytes
+
+
+def bsim_submission(
+    signer: User, source_id: uuid.UUID, links: list[tuple[uuid.UUID, uuid.UUID]], *,
+    claimed: User | None = None, domain: bytes = BSIM_SIGNATURE,
+) -> dict:
+    """``claimed`` is the Analyst the submission names (default: the signer)."""
+    analyst = (claimed or signer).user_id
+    bsim_id, object_json = uuid.uuid4(), '{"vector": [1, 2], "tool": "test"}'
+    sha256, md5 = _text_digests(object_json)
+    record = encode_fields(BSIM_RECORD, [
+        bsim_id.bytes, analyst.bytes, source_id.bytes, sha256, md5,
+        b"".join(sorted(f.bytes + b.bytes for f, b in links)),
+    ])
+    return {
+        "bsim_id": str(bsim_id), "analyst_id": str(analyst), "source_id": str(source_id),
+        "object_json": object_json,
+        "functions": [{"function_id": str(f), "binary_id": str(b)} for f, b in links],
+        "signature": sign(signer.key, domain, record),
+    }
+
+
+def provenance_submission(
+    signer: User, source_id: uuid.UUID, binary_id: uuid.UUID, *,
+    claimed: User | None = None, domain: bytes = PROVENANCE_SIGNATURE,
+) -> dict:
+    analyst = (claimed or signer).user_id
+    provenance_id, object_json = uuid.uuid4(), '{"class_uid": 5020, "unmapped": {"relic": {}}}'
+    sha256, md5 = _text_digests(object_json)
+    record = encode_fields(PROVENANCE_RECORD, [
+        provenance_id.bytes, analyst.bytes, source_id.bytes,
+        _optional_id(None), _optional_id(None), _optional_id(binary_id),
+        encode_optional("ocsf"), encode_optional(None), sha256, md5,
+    ])
+    return {
+        "provenance_id": str(provenance_id), "analyst_id": str(analyst),
+        "source_id": str(source_id), "binary_id": str(binary_id), "schema_name": "ocsf",
+        "object_json": object_json, "signature": sign(signer.key, domain, record),
+    }
+
+
+def _outcome(database, submission_id) -> tuple[str, str | None]:
+    return tuple(database.execute(
+        "SELECT status::text, error FROM catalogue.submission WHERE submission_id = %s",
+        (submission_id,),
+    )[0])
+
+
+def _integrity_count(database) -> int:
+    return database.execute("SELECT count(*) FROM catalogue.integrity")[0][0]
+
+
+def _exists(database, table: str, key: str, value) -> bool:
+    return bool(database.execute(f"SELECT 1 FROM catalogue.{table} WHERE {key} = %s", (value,)))
+
+
+def test_python_built_bsim_and_provenance_are_admitted(client, database, object_dirs, setup):
+    """Positive control for the mirrored formats below."""
+    fidbf = admitted_fidbf(client, database, object_dirs, setup)
+    analyst = database.create_user("analyst")
+    headers = bearer(login(client, analyst))
+    bsim = bsim_submission(analyst, fidbf.ids["source"], [(fidbf.ids["f1"], fidbf.ids["binary"])])
+    seal = provenance_submission(analyst, fidbf.ids["source"], fidbf.ids["binary"])
+    assert client.post("/v1/bsim", json=bsim, headers=headers).status_code == 202
+    assert client.post("/v1/provenance", json=seal, headers=headers).status_code == 202
+    run_admit(database, object_dirs, setup)
+    assert _outcome(database, bsim["bsim_id"])[0] == "admitted"
+    assert _outcome(database, seal["provenance_id"])[0] == "admitted"
+    assert _exists(database, "bsim", "bsim_id", bsim["bsim_id"])
+    assert _exists(database, "provenance", "provenance_id", seal["provenance_id"])
+
+
+@pytest.mark.parametrize("kind", ["fidbf", "bsim", "provenance"])
+@pytest.mark.parametrize("case", ["another_users_id", "other_operation", "revoked_submitter"])
+def test_negative_acceptance(client, database, object_dirs, setup, kind, case):
+    """Each failure is rejected by relic-admit and leaves the catalogue and chain unchanged."""
+    fidbf = admitted_fidbf(client, database, object_dirs, setup)
+    if kind == "fidbf":
+        signer_id, signer_headers = setup.analyst_id, setup.headers
+        submission = signed_fidbf(setup)
+        assert upload(client, setup, submission).status_code == 201
+        payload, key = submission.signed, ("fidbf", "fidbf_id")
+        object_id = submission.ids["fidbf"]
+        if case == "other_operation":
+            # The source signature (valid for the source record) as the FIDBF's.
+            payload["analyst_signatures"]["fidbf"] = payload["analyst_signatures"]["source"]
+    else:
+        analyst = database.create_user("analyst")
+        signer_id, signer_headers = analyst.user_id, bearer(login(client, analyst))
+        claimed = database.create_user("analyst") if case == "another_users_id" else None
+        if kind == "bsim":
+            other_domain = PROVENANCE_SIGNATURE
+            payload = bsim_submission(
+                analyst, fidbf.ids["source"], [(fidbf.ids["f1"], fidbf.ids["binary"])],
+                claimed=claimed, domain=other_domain if case == "other_operation" else BSIM_SIGNATURE,
+            )
+            key = ("bsim", "bsim_id")
+        else:
+            other_domain = BSIM_SIGNATURE
+            payload = provenance_submission(
+                analyst, fidbf.ids["source"], fidbf.ids["binary"], claimed=claimed,
+                domain=other_domain if case == "other_operation" else PROVENANCE_SIGNATURE,
+            )
+            key = ("provenance", "provenance_id")
+        object_id = payload[key[1]]
+
+    if case == "another_users_id":
+        if kind == "fidbf":
+            other_id, _ = _ssh_account(database, setup.tmp, "claimed", "analyst", "human")
+            payload["analyst_user_id"] = str(other_id)
+        claimed_id = payload.get("analyst_id") or payload["analyst_user_id"]
+        # The API refuses it from the signer: the caller must be the Analyst named...
+        response = client.post(f"/v1/{kind}", json=payload, headers=signer_headers)
+        assert response.status_code == 403, response.text
+        # ...so stage it as a compromised API could, under the claimed Analyst.
+        _stage_as_app(database, object_id, kind, claimed_id, json.dumps(payload),
+                      payload["fidbf"]["sha256"] if kind == "fidbf" else None)
+    else:
+        response = client.post(f"/v1/{kind}", json=payload, headers=signer_headers)
+        assert response.status_code == 202, response.text
+        if case == "revoked_submitter":
+            database.revoke(signer_id)
+
+    chain = _integrity_count(database)
+    run_admit(database, object_dirs, setup)
+    state, error = _outcome(database, object_id)
+    assert state == "rejected", (kind, case, error)
+    expected = "not an active Analyst" if case == "revoked_submitter" else "signature"
+    assert expected in error, (kind, case, error)
+    assert _integrity_count(database) == chain
+    assert not _exists(database, *key, object_id)
+
+
+def test_database_refuses_staging_for_a_non_analyst(database):
+    viewer = database.create_user("viewer")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        _stage_as_app(database, uuid.uuid4(), "provenance", viewer.user_id, "{}")

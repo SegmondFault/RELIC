@@ -176,8 +176,10 @@ Reason = Annotated[str, Field(min_length=1, max_length=2000), AfterValidator(_cl
 
 
 class RevocationRequest(_Request):
-    revocation_id: UUID = Field(description="Chosen by the Analyst; makes the request single-use")
-    analyst_id: UUID = Field(description="The requesting Analyst: must be the caller")
+    revocation_id: UUID = Field(description="Chosen by the requester; makes the request single-use")
+    requester_id: UUID = Field(
+        description="The caller: an Analyst for a catalogue entry, a Moderator for an account"
+    )
     target_type: TargetType
     target_id: UUID
     reason: Reason
@@ -189,12 +191,12 @@ class RevocationDetail(BaseModel):
 
     revocation_id: UUID
     status: RevocationStatus
-    analyst_id: UUID
+    requester_id: UUID
     target_type: TargetType
     target_id: UUID
     reason: str
     requested_at: datetime
-    request_signature: str = Field(description="Analyst's signature, lowercase hex")
+    request_signature: str = Field(description="The requester's signature, lowercase hex")
     moderator_id: UUID | None
     decided_at: datetime | None
     decision_signature: str | None = Field(description="Moderator's signature, lowercase hex")

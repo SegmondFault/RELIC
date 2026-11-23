@@ -9,7 +9,8 @@
 #   scripts/local-dev.sh approve|reject <request_id> <moderator_key>
 #                                                   log in as the Moderator (by key), sign and
 #                                                   submit the decision through the running API
-#   scripts/local-dev.sh revoke <target_type> <target_id> <analyst_key> <reason>
+#   scripts/local-dev.sh revoke <target_type> <target_id> <requester_key> <reason>
+#       (an Analyst's key for a catalogue entry, a Moderator's for an account)
 #                                                   log in as the Analyst, sign and submit a
 #                                                   revocation request
 #   scripts/local-dev.sh approve-revocation|reject-revocation <revocation_id> <moderator_key>
@@ -175,7 +176,7 @@ cmd_decide() {
 
 cmd_revoke() {
     (( $# == 4 )) || {
-        echo "usage: $0 revoke <target_type> <target_id> <analyst_key> <reason>" >&2; exit 2;
+        echo "usage: $0 revoke <target_type> <target_id> <requester_key> <reason>" >&2; exit 2;
     }
     local target_type="$1" target_id="$2" key="$3" reason="$4" token user_id
     require_uuid "$target_id"
@@ -184,7 +185,7 @@ cmd_revoke() {
     trap "rm -rf '$work'" RETURN
 
     login_as "$key" "$work"
-    "$signer" request-revocation --analyst-id "$user_id" --target-type "$target_type" \
+    "$signer" request-revocation --requester-id "$user_id" --target-type "$target_type" \
         --target-id "$target_id" --reason "$reason" --key "$key" > "$work/revocation.json"
     curl -sS --fail-with-body -X POST "$api/revocations" \
         -H "authorization: Bearer $token" -H 'content-type: application/json' \

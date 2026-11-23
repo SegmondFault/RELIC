@@ -76,11 +76,12 @@ enum Command {
         #[command(flatten)]
         key: KeyArgs,
     },
-    /// Sign an Analyst's request to revoke a catalogue object or account.
+    /// Sign a request to revoke a catalogue entry (Analysts) or an account
+    /// (`--target-type user`, Moderators).
     RequestRevocation {
-        /// The requesting Analyst's own User ID.
+        /// The requester's own User ID.
         #[arg(long)]
-        analyst_id: Uuid,
+        requester_id: Uuid,
         #[arg(long, value_parser = TARGET_TYPES)]
         target_type: String,
         #[arg(long)]
@@ -101,7 +102,7 @@ enum Command {
         /// Request JSON returned by `GET /v1/revocations/{id}`.
         #[arg(long)]
         request: PathBuf,
-        /// The requesting Analyst, as returned by `GET /v1/users/{analyst_id}`.
+        /// The requester, as returned by `GET /v1/users/{requester_id}`.
         #[arg(long)]
         requester: PathBuf,
         /// The target, as returned by its read route (e.g. `GET /v1/users/{id}`,
@@ -468,7 +469,7 @@ fn note_approvals(required: u8, approvals: &[ApprovalEntry]) {
 struct RevocationFile {
     revocation_id: Uuid,
     status: String,
-    analyst_id: Uuid,
+    requester_id: Uuid,
     target_type: String,
     target_id: Uuid,
     reason: String,
@@ -556,7 +557,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             key,
         } => decide_registration(&request, moderator_id, parse_decision(&decision), &key)?,
         Command::RequestRevocation {
-            analyst_id,
+            requester_id,
             target_type,
             target_id,
             reason,
@@ -564,7 +565,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             key,
         } => request_revocation(
             revocation_id.unwrap_or_else(Uuid::new_v4),
-            analyst_id,
+            requester_id,
             &target_type,
             target_id,
             &reason,
@@ -681,7 +682,7 @@ fn decide_registration(
 /// Body for `POST /v1/revocations`.
 fn request_revocation(
     revocation_id: Uuid,
-    analyst_id: Uuid,
+    requester_id: Uuid,
     target_type: &str,
     target_id: Uuid,
     reason: &str,
@@ -689,7 +690,7 @@ fn request_revocation(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let request = RevocationRequest {
         revocation_id: revocation_id.as_bytes(),
-        analyst_id: analyst_id.as_bytes(),
+        requester_id: requester_id.as_bytes(),
         target_type,
         target_id: target_id.as_bytes(),
         reason,
@@ -700,7 +701,7 @@ fn request_revocation(
     let signature = signer.sign_digest(auth::REVOCATION_REQUEST_SIGNATURE_DOMAIN, &digest);
     Ok(json!({
         "revocation_id": revocation_id,
-        "analyst_id": analyst_id,
+        "requester_id": requester_id,
         "target_type": target_type,
         "target_id": target_id,
         "reason": reason,
@@ -725,7 +726,7 @@ fn decide_revocation(
     }
     let stored = RevocationRequest {
         revocation_id: file.revocation_id.as_bytes(),
-        analyst_id: file.analyst_id.as_bytes(),
+        requester_id: file.requester_id.as_bytes(),
         target_type: &file.target_type,
         target_id: file.target_id.as_bytes(),
         reason: &file.reason,
@@ -773,10 +774,25 @@ fn verify_revocation_request(
     requester: &Path,
 ) -> Result<UserFile, Box<dyn std::error::Error>> {
     let user: UserFile = serde_json::from_slice(&fs::read(requester)?)?;
-    if user.user_id != file.analyst_id {
+    if user.user_id != file.requester_id {
         return Err(format!(
             "requester file is for {}, but the request names {}",
-            user.user_id, file.analyst_id
+            user.user_id, file.requester_id
+        )
+        .into());
+    }
+    // Accounts are revoked at a Moderator's request, entries at an Analyst's.
+    let expected = if file.target_type == "user" {
+        "moderator"
+    } else {
+        "analyst"
+    };
+    if user.role.as_deref() != Some(expected) {
+        return Err(format!(
+            "a {} revocation must be requested by a {expected}; {} is {}; not signing",
+            file.target_type,
+            user.user_id,
+            user.role.as_deref().unwrap_or("no role")
         )
         .into());
     }
@@ -795,7 +811,7 @@ fn verify_revocation_request(
     .map_err(|_| {
         format!(
             "request {} does not verify with the key registered for {}; not signing",
-            file.revocation_id, file.analyst_id
+            file.revocation_id, file.requester_id
         )
     })?;
     Ok(user)

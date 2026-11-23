@@ -259,9 +259,10 @@ def test_analyst_builds_the_component_model_and_any_account_can_read(
     assert [x["software_release_id"] for x in client.get(
         f"/v1/software-releases?component_id={component_id}", headers=viewer).json()
     ] == [str(release_id)]
-    assert [x["component_id"] for x in client.get(
-        "/v1/software-components?purl=pkg:generic/openssl", headers=viewer).json()
-    ] == [str(component_id)]
+    # Other tests may name components with the same purl.
+    found = client.get("/v1/software-components?purl=pkg:generic/openssl", headers=viewer).json()
+    assert str(component_id) in [x["component_id"] for x in found]
+    assert {x["purl"] for x in found} == {"pkg:generic/openssl"}
     assert len(client.get(
         f"/v1/binary-component-assertions?binary_id={objects.binary_id}", headers=viewer).json()
     ) == 1
@@ -614,7 +615,7 @@ def test_rust_client_builds_the_model_and_relic_verify_agrees(
     other_id, other_key = _ssh_user(database, tmp_path, "other_ed25519", "analyst")
     moderator_id, moderator_key = _ssh_user(database, tmp_path, "moderator_ed25519", "moderator")
     request = _cli(
-        "request-revocation", "--analyst-id", str(other_id), "--target-type", "software_component",
+        "request-revocation", "--requester-id", str(other_id), "--target-type", "software_component",
         "--target-id", component["component_id"], "--reason", "Duplicate", "--key", str(other_key),
     )
     other_headers = bearer(_login_with_cli(client, other_id, other_key, tmp_path))

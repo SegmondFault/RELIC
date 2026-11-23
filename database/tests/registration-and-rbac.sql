@@ -259,10 +259,10 @@ BEGIN
     rejected := false;
     BEGIN
         INSERT INTO revocation (
-            analyst_request_id, moderator_id, target_type, target_id, reason,
+            requester_id, moderator_id, target_type, target_id, reason,
             decision, decided_at, request_signature, decision_signature
         ) VALUES (
-            analyst, moderator_b, 'user', moderator_a, 'pre-decided',
+            moderator_c, moderator_b, 'user', moderator_a, 'pre-decided',
             'approved', clock_timestamp(), decode(repeat('01', 64), 'hex'), decode(repeat('02', 64), 'hex')
         );
     EXCEPTION WHEN check_violation THEN
@@ -273,9 +273,9 @@ BEGIN
     END IF;
 
     INSERT INTO revocation (
-        analyst_request_id, target_type, target_id, reason, request_signature
+        requester_id, target_type, target_id, reason, request_signature
     ) VALUES (
-        analyst, 'user', moderator_a, 'test', decode(repeat('01', 64), 'hex')
+        moderator_c, 'user', moderator_a, 'test', decode(repeat('01', 64), 'hex')
     ) RETURNING revocation_id INTO rev_id;
 
     rejected := false;
@@ -358,8 +358,8 @@ DECLARE
 BEGIN
     rejected := false;
     BEGIN
-        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-        VALUES (analyst, 'user', viewer, 'short signature', '\x01');
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'user', viewer, 'short signature', '\x01');
     EXCEPTION WHEN check_violation THEN
         rejected := true;
     END;
@@ -367,14 +367,14 @@ BEGIN
         RAISE EXCEPTION 'non-Ed25519 request signature was accepted';
     END IF;
 
-    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-    VALUES (analyst, 'user', viewer, 'first', sig)
+    INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+    VALUES (moderator_b, 'user', viewer, 'first', sig)
     RETURNING revocation_id INTO rev_id;
 
     rejected := false;
     BEGIN
-        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-        VALUES (analyst, 'user', viewer, 'second', sig);
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'user', viewer, 'second', sig);
     EXCEPTION WHEN unique_violation THEN
         rejected := true;
     END;
@@ -387,8 +387,8 @@ BEGIN
            decided_at = clock_timestamp(), decision_signature = sig
      WHERE revocation_id = rev_id;
 
-    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-    VALUES (analyst, 'user', viewer, 'after rejection', sig)
+    INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+    VALUES (moderator_b, 'user', viewer, 'after rejection', sig)
     RETURNING revocation_id INTO rev_id;
 
     rejected := false;
@@ -411,8 +411,8 @@ BEGIN
 
     rejected := false;
     BEGIN
-        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-        VALUES (analyst, 'user', viewer, 'again', sig);
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'user', viewer, 'again', sig);
     EXCEPTION WHEN unique_violation THEN
         rejected := true;
     END;
@@ -434,12 +434,12 @@ DECLARE
     moderator_b uuid := (SELECT id FROM pg_temp.t WHERE name = 'moderator_b');
     sig bytea := decode(repeat('04', 64), 'hex');
 BEGIN
-    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+    INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
     VALUES (analyst_b, 'source', (SELECT id FROM pg_temp.t WHERE name = 'source'), 'bad source', sig)
     RETURNING revocation_id INTO orphan;
 
-    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-    VALUES (analyst, 'user', analyst_b, 'requester revoked', sig)
+    INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+    VALUES (moderator_b, 'user', analyst_b, 'requester revoked', sig)
     RETURNING revocation_id INTO rev_id;
     UPDATE revocation
        SET moderator_id = moderator_b, decision = 'approved',
@@ -459,7 +459,7 @@ BEGIN
 
     rejected := false;
     BEGIN
-        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
         VALUES (analyst_b, 'source', gen_random_uuid(), 'revoked requester', sig);
     EXCEPTION WHEN insufficient_privilege THEN
         rejected := true;
@@ -470,13 +470,45 @@ BEGIN
 
     rejected := false;
     BEGIN
-        INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-        VALUES (analyst, 'user', (SELECT id FROM pg_temp.t WHERE name = 'system'), 'worker', sig);
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'user', (SELECT id FROM pg_temp.t WHERE name = 'system'), 'worker', sig);
     EXCEPTION WHEN insufficient_privilege THEN
         rejected := true;
     END;
     IF NOT rejected THEN
         RAISE EXCEPTION 'relic_app could request revocation of a system account';
+    END IF;
+
+    -- Accounts at a Moderator's request, entries at an Analyst's, never one's own.
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (analyst, 'user', (SELECT id FROM pg_temp.t WHERE name = 'viewer'), 'x', sig);
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'an Analyst filed an account revocation';
+    END IF;
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'source', (SELECT id FROM pg_temp.t WHERE name = 'source'), 'x', sig);
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a Moderator filed a catalogue-entry revocation';
+    END IF;
+    rejected := false;
+    BEGIN
+        INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+        VALUES (moderator_b, 'user', moderator_b, 'x', sig);
+    EXCEPTION WHEN insufficient_privilege THEN
+        rejected := true;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'a Moderator filed against their own account';
     END IF;
 END
 $$;
@@ -490,8 +522,8 @@ DECLARE
     system_id uuid := (SELECT id FROM pg_temp.t WHERE name = 'system');
     sig bytea := decode(repeat('05', 64), 'hex');
 BEGIN
-    INSERT INTO revocation (analyst_request_id, target_type, target_id, reason, request_signature)
-    VALUES ((SELECT id FROM pg_temp.t WHERE name = 'analyst'), 'user', system_id, 'worker key rotated', sig)
+    INSERT INTO revocation (requester_id, target_type, target_id, reason, request_signature)
+    VALUES ((SELECT id FROM pg_temp.t WHERE name = 'moderator_b'), 'user', system_id, 'worker key rotated', sig)
     RETURNING revocation_id INTO rev_id;
     UPDATE revocation
        SET moderator_id = (SELECT id FROM pg_temp.t WHERE name = 'moderator_b'),

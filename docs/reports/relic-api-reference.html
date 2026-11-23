@@ -140,7 +140,8 @@ account stays visible, marked revoked.</p>
   <tr><td>Assert licences, classify; name components and releases, link binaries to them, define compositions</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Submit FIDBF (with source, batch, binary, functions), BSim, provenance: staged, admitted by relic-admit</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Request revocation of a catalogue entry</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
+  <tr><td>Revoke an account: file and decide (a Moderator account needs a second Moderator)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Review and decide registrations (a new Moderator needs two)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Decide revocations (never their own; a Moderator needs two; system accounts: operator only)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Sign integrity-chain entries and MMR checkpoints (workers)</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="muted small">outside API</td></tr>
@@ -338,8 +339,8 @@ can never be replayed as another.</p>
 </table>
 <div class="note">The server never trusts the nonce, expiry or audience a client sends back: it rebuilds the bytes from its own challenge row.
 Changing any field means a new <code>v2</code> domain and new vectors, never editing <code>v1</code>.</div>
-<p><b>Revocations</b> use the same construction without a challenge. The Analyst signs
-<code>revocation_id · analyst_id · target_type · target_id · reason</code> under
+<p><b>Revocations</b> use the same construction without a challenge. The requester (an Analyst for a catalogue entry, a Moderator for an account) signs
+<code>revocation_id · requester_id · target_type · target_id · reason</code> under
 <code>revocation-request:v1</code> / <code>revocation-request-signature:v1</code>; the client-chosen
 <code>revocation_id</code> is the row's primary key, so a signed request is stored once (identical retry → 200).
 The Moderator signs those five stored fields plus <code>moderator_id · verdict</code> under
@@ -363,7 +364,7 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>GET</td><td class="mono">/v1/registrations[/{id}]</td><td>Moderator</td><td>requests incl. contact details; filter <code>status=pending|approved|rejected</code></td></tr>
   <tr><td>POST</td><td class="mono">/v1/registrations/{id}/decision</td><td>Moderator · signed</td><td>200 · 202 first of two (new Moderator) · 403 bad signature · 409 decided or already approved</td></tr>
   <tr><td>GET</td><td class="mono">/v1/revocations[/{id}]</td><td>logged in</td><td>requests and decisions with both signatures; filter <code>status</code>, <code>target_type</code>, <code>target_id</code></td></tr>
-  <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature or system account · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst (entries) · Moderator (accounts) · signed</td><td>201 · 200 retry · 403 bad signature, wrong role for the target, own account or system account · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 · 202 first of two (Moderator target) · 403 bad signature or own account · 409 decided; account revocation is immediate</td></tr>
   <tr><td>POST</td><td class="mono">/v1/license-assertions<br>/v1/classifications<br>/v1/software-components<br>/v1/software-releases<br>/v1/binary-component-assertions<br>/v1/behavioural-compositions</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 409 target revoked or ID reused · 422 invalid or unknown target. A composition is signed with all its members and written with them in one transaction; the database refuses members added later</td></tr>
   <tr><td>PUT</td><td class="mono">/v1/fidbf-objects/{sha256}</td><td>Analyst</td><td>raw object, streamed and hashed into staging (≤ 64 MiB, 2 at a time and 1 GiB/day per Analyst) · 201 · 200 already staged · 411 · 413 · 422 digest mismatch · 429 / 503 too many · 507 staging full</td></tr>
@@ -404,9 +405,9 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
 <pre style="margin-bottom:3px; padding:5px 10px">dev=scripts/local-dev.sh; $dev up; $dev api     # Postgres on :55433, API on :8000
 $dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
 $dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
-$dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
+$dev revoke user TARGET_ID ~/.ssh/mod "reason"; $dev approve-revocation ID ~/.ssh/mod
 $dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
-<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 391 pytest + <code>cargo test</code>.</p>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 410 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

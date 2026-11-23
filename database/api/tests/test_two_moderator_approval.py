@@ -193,12 +193,13 @@ def test_database_refuses_single_moderator_approval(client, database, moderators
 
 @pytest.fixture
 def moderator_revocation(client, database) -> tuple[dict, User]:
-    analyst = database.create_user("analyst")
+    """A revocation of a Moderator account, filed by a third Moderator."""
+    filer = database.create_user("moderator")
     target = database.create_user("moderator")
     response = client.post(
         "/v1/revocations",
-        json=revocation_request_body(analyst, target.user_id, reason="Key compromised"),
-        headers=bearer(login(client, analyst)),
+        json=revocation_request_body(filer, target.user_id, reason="Key compromised"),
+        headers=bearer(login(client, filer)),
     )
     assert response.status_code == 201, response.text
     return response.json(), target
@@ -230,7 +231,7 @@ def test_revoking_a_moderator_needs_two_moderators(client, moderators, moderator
     record = revocation_decision_record(
         RevocationRequest(
             revocation_id=uuid.UUID(stored["revocation_id"]),
-            analyst_id=uuid.UUID(stored["analyst_id"]),
+            requester_id=uuid.UUID(stored["requester_id"]),
             target_type="user",
             target_id=target.user_id,
             reason=stored["reason"],
@@ -255,12 +256,12 @@ def test_one_moderator_can_reject_a_moderator_revocation(client, moderators, mod
 
 
 def test_revoking_other_accounts_needs_one_moderator(client, database, moderators):
-    analyst = database.create_user("analyst")
+    filer = database.create_user("moderator")
     target = database.create_user("analyst")
     stored = client.post(
         "/v1/revocations",
-        json=revocation_request_body(analyst, target.user_id),
-        headers=bearer(login(client, analyst)),
+        json=revocation_request_body(filer, target.user_id),
+        headers=bearer(login(client, filer)),
     ).json()
     assert stored["approvals_required"] == 1
     assert _decide_revocation(client, moderators[0], stored).status_code == 200

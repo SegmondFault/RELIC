@@ -117,20 +117,24 @@ decision later without the API.
 ### Revocation request
 
 - `D = RELIC:revocation-request:v1`, `S = RELIC:revocation-request-signature:v1`
-- fields: `revocation_id`, `analyst_id` (both UUID bytes), `target_type`
+- fields: `revocation_id`, `requester_id` (both UUID bytes), `target_type`
   (a `corpus_target_type` value, e.g. `user` or `fidbf`), `target_id`, `reason`
 - `POST /v1/revocations` with those values plus `signature`
 
-Only an active Analyst can request, and `analyst_id` must be the caller. The
-API verifies the signature with the key registered for `analyst_id`, never a
-key from the request. There is no challenge: the Analyst chooses
+Who requests depends on the target: an active **Analyst** requests revocation
+of a catalogue entry, an active **Moderator** files the revocation of an
+account (`target_type = user`, never their own). Anything else is `403`, and
+the database enforces the same. `requester_id` must be the caller. (Until 008
+the field was named `analyst_id`; the encoding is unchanged.) The API verifies
+the signature with the key registered for `requester_id`, never a key from the
+request. There is no challenge: the requester chooses
 `revocation_id` (a fresh UUID) and signs it, and it is the row's primary key,
 so a signed request is stored at most once. An identical retry returns the
 stored request (`200`); the same ID with different content is `409`.
 
 The database allows one open request per target and refuses a request for a
 target that is already revoked (both `409`). A rejected target can be
-requested again. The requester must be an active Analyst when filing; the
+requested again. The requester must be active when filing; the
 request stays decidable if they are revoked afterwards, so a revoked requester
 cannot block a target. System accounts (the integrity and MMR workers) cannot
 be revoked through the API (`403`): revoking one stops admissions and
@@ -145,7 +149,9 @@ login reports `403 Account has been revoked`.
   (`approved` or `rejected`)
 - `POST /v1/revocations/{id}/decision` with `{moderator_id, decision, signature}`
 
-As with registrations, the Moderator signs exactly what they reviewed
+Any active Moderator may decide, including the one who filed the request:
+revoking a Viewer or Analyst account takes one Moderator. As with
+registrations, the Moderator signs exactly what they reviewed
 (`GET /v1/revocations/{id}`) and their verdict, `moderator_id` must be the
 caller, and the API verifies with that Moderator's registered key over the
 stored row in the same transaction as the update. The database re-checks that
@@ -377,11 +383,13 @@ curl -s -X POST https://$HOST/v1/registrations/$REQUEST_ID/decision \
      -d @decision.json
 ```
 
-**Request a revocation** (Analyst, logged in as above; `$ANALYST_ID` from
-`/v1/me`). Keep the printed body: resending it unchanged is a safe retry.
+**Request a revocation**: an Analyst for a catalogue entry, a Moderator for
+an account (logged in as above; `$MY_ID` from `/v1/me`). Keep the printed body:
+resending it unchanged is a safe retry. A Moderator then decides it, and may
+decide their own request (a Moderator account needs a second Moderator).
 
 ```bash
-target/release/relic-sign-challenge request-revocation --analyst-id "$ANALYST_ID" \
+target/release/relic-sign-challenge request-revocation --requester-id "$MY_ID" \
      --target-type user --target-id "$TARGET_ID" --reason "Key reported lost" \
      --key ~/.ssh/relic_ed25519 > revocation.json
 curl -s -X POST https://$HOST/v1/revocations \

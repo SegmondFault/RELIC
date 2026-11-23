@@ -179,7 +179,7 @@ def corpus(database) -> Corpus:
 
     # The FIDBF object is revoked; nothing else is.
     revocation_id = run(
-        "INSERT INTO catalogue.revocation (analyst_request_id, target_type, target_id, reason,"
+        "INSERT INTO catalogue.revocation (requester_id, target_type, target_id, reason,"
         " request_signature) VALUES (%s, 'fidbf', %s, 'corrupt', %s) RETURNING revocation_id",
         (analyst.user_id, fidbf_id, sig),
     )[0][0]
