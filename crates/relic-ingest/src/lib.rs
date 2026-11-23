@@ -90,7 +90,7 @@ impl FromStr for SignatureHex {
             return Err(SignatureParseError);
         }
         let mut bytes = [0_u8; 64];
-        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let pair = std::str::from_utf8(pair).map_err(|_| SignatureParseError)?;
             bytes[index] = u8::from_str_radix(pair, 16).map_err(|_| SignatureParseError)?;
         }
@@ -755,7 +755,7 @@ fn parse_md5(value: &str) -> Result<CompatibilityMd5, IngestError> {
         return Err(IngestError::Validation("invalid FIDBF MD5".into()));
     }
     let mut bytes = [0_u8; 16];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair)
             .map_err(|_| IngestError::Validation("invalid FIDBF MD5".into()))?;
         bytes[index] = u8::from_str_radix(pair, 16)

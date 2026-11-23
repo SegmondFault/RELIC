@@ -1,0 +1,15 @@
+[Unit]
+Description=RELIC backup archive retention
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/local/sbin/relic-backup-retention
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=1h
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
