@@ -644,3 +644,126 @@ def test_rust_client_builds_the_model_and_relic_verify_agrees(
     assert decided.status_code == 200, decided.text
     read = client.get(f"/v1/software-components/{component['component_id']}", headers=headers)
     assert read.json()["revoked"] is True
+
+
+# ---------------------------------------------------------------------------
+# What depends on a revoked row, revoked evidence, ordered positions
+# ---------------------------------------------------------------------------
+
+
+def test_ancestor_revoked_marks_rows_built_on_a_revoked_row(
+    client, database, analyst, analyst_headers, objects, release
+):
+    component_id, release_id = release
+    assertion = _post(
+        client, "binary-component-assertions",
+        assertion_body(analyst, objects.binary_id, release_id), analyst_headers,
+    ).json()
+    composition = _post(
+        client, "behavioural-compositions",
+        composition_body(analyst, default_members(objects)), analyst_headers,
+    ).json()
+    assert (assertion["ancestor_revoked"], composition["ancestor_revoked"]) == (False, False)
+
+    def read(path: str, key: str) -> dict:
+        return client.get(f"/v1/{path}/{key}", headers=analyst_headers).json()
+
+    database.revoke(component_id, "software_component")
+    for path, key in (("software-releases", release_id),
+                      ("binary-component-assertions",
+                       assertion["binary_component_assertion_id"])):
+        row = read(path, key)
+        assert (row["revoked"], row["ancestor_revoked"]) == (False, True), path
+    listed = client.get(
+        f"/v1/binary-component-assertions?binary_id={objects.binary_id}", headers=analyst_headers
+    ).json()
+    assert [row["ancestor_revoked"] for row in listed] == [True]
+
+    database.revoke(objects.function_id, "function")
+    row = read("behavioural-compositions", composition["behavioural_composition_id"])
+    assert (row["revoked"], row["ancestor_revoked"]) == (False, True)
+
+
+def _provenance(database, objects: Objects) -> uuid.UUID:
+    provenance_id = uuid.uuid4()
+    owner = database.create_user("analyst")
+    database.execute(
+        "INSERT INTO catalogue.provenance (provenance_id, binary_id, schema_name, schema_version,"
+        " object_data, sha256, md5, submitted_by_user_id, signature, source_id)"
+        " VALUES (%s, %s, 'ocsf', '1.3.0', '{\"class_uid\": 1}', %s, %s, %s, %s, %s)",
+        (provenance_id, objects.binary_id, uuid.uuid4().hex * 2, uuid.uuid4().hex,
+         owner.user_id, b"\x11" * 64, objects.source_id),
+    )
+    return provenance_id
+
+
+def test_revoked_evidence_is_refused(client, database, analyst, analyst_headers, objects, release):
+    from .test_claims_api import license_body
+
+    _, release_id = release
+    evidence = _provenance(database, objects)
+    accepted = _post(
+        client, "binary-component-assertions",
+        assertion_body(analyst, objects.binary_id, release_id, evidence_provenance_id=evidence),
+        analyst_headers,
+    ).json()
+    assert accepted["ancestor_revoked"] is False
+
+    database.revoke(evidence, "provenance")
+    for path, body in (
+        ("license-assertions",
+         license_body(analyst, objects.binary_id, evidence_provenance_id=evidence)),
+        ("binary-component-assertions",
+         assertion_body(analyst, objects.binary_id, release_id, evidence_provenance_id=evidence)),
+        ("behavioural-compositions",
+         composition_body(analyst, default_members(objects), evidence_provenance_id=evidence)),
+    ):
+        response = _post(client, path, body, analyst_headers)
+        assert response.status_code == 409, (path, response.text)
+        assert "Evidence provenance" in response.json()["detail"], path
+    stored = client.get(
+        f"/v1/binary-component-assertions/{accepted['binary_component_assertion_id']}",
+        headers=analyst_headers,
+    ).json()
+    assert stored["ancestor_revoked"] is True
+
+
+def test_each_position_is_used_once(client, database, analyst, analyst_headers, objects):
+    members = default_members(objects)
+    members[1]["sequence_number"] = members[0]["sequence_number"]
+    body = composition_body(analyst, members)
+    response = _post(client, "behavioural-compositions", body, analyst_headers)
+    assert response.status_code == 422 and "sequence_number" in response.text
+
+    # The database enforces it too, whatever the API checks.
+    composition_id = uuid.uuid4()
+    with psycopg.connect(database.app_url) as conn:
+        conn.execute(
+            "INSERT INTO catalogue.behavioural_composition (behavioural_composition_id, name,"
+            " member_count, submitted_by_analyst_id, signature) VALUES (%s, 'x', 2, %s, %s)",
+            (composition_id, analyst.user_id, b"\x01" * 64),
+        )
+        insert = ("INSERT INTO catalogue.composition_member (behavioural_composition_id,"
+                  " target_type, target_id, member_role, sequence_number)"
+                  " VALUES (%s, %s, %s, %s, 0)")
+        conn.execute(insert, (composition_id, "binary", objects.binary_id, "a"))
+        with pytest.raises(psycopg.errors.UniqueViolation, match="composition_member_sequence_idx"):
+            conn.execute(insert, (composition_id, "function", objects.function_id, "b"))
+        conn.rollback()
+
+
+def test_member_filter_pages_in_order(client, database, analyst, analyst_headers, objects):
+    """One member in several compositions, under several roles in one of them."""
+    members = default_members(objects)
+    twice = members + [{"target_type": "binary", "target_id": objects.binary_id,
+                        "member_role": "dropper", "sequence_number": None}]
+    created = sorted(
+        _post(client, "behavioural-compositions", composition_body(analyst, m),
+              analyst_headers).json()["behavioural_composition_id"]
+        for m in (members, twice, members[:1])
+    )
+    url = f"/v1/behavioural-compositions?member_type=binary&member_id={objects.binary_id}"
+    first = client.get(url + "&limit=2", headers=analyst_headers).json()
+    rest = client.get(url + f"&limit=2&after={first[-1]['behavioural_composition_id']}",
+                      headers=analyst_headers).json()
+    assert [r["behavioural_composition_id"] for r in first + rest] == created

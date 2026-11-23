@@ -1018,6 +1018,7 @@ fn compose(args: &ComposeArgs) -> Result<serde_json::Value, Box<dyn std::error::
         return Err("a composition needs at least one member".into());
     }
     let mut seen = std::collections::HashSet::new();
+    let mut positions = std::collections::HashSet::new();
     for entry in &entries {
         if !matches!(entry.target_type.as_str(), "binary" | "function") {
             return Err(format!(
@@ -1031,6 +1032,11 @@ fn compose(args: &ComposeArgs) -> Result<serde_json::Value, Box<dyn std::error::
         }
         if !seen.insert(entry) {
             return Err("members must be distinct".into());
+        }
+        if let Some(position) = entry.sequence_number {
+            if !positions.insert(position) {
+                return Err(format!("sequence_number {position} is used more than once").into());
+            }
         }
     }
     let members: Vec<auth::CompositionMember<'_>> = entries

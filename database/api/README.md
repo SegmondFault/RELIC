@@ -129,9 +129,9 @@ designed).
 | `/v1/license-assertions`, `/v1/license-assertions/{id}` | `source_id`, `binary_id` | Signed SPDX licence claims on one source or one binary, with `target_type` and `target_id` as signed. |
 | `/v1/classifications`, `/v1/classifications/{id}` | `target_type`, `target_id` | Signed labels on binaries, functions or behavioural compositions; `evidence` and the signed `evidence_json` on `/{id}` only. |
 | `/v1/software-components`, `/v1/software-components/{id}` | `purl` | Signed software identities (library, application, runtime...). Not a claim about any binary. |
-| `/v1/software-releases`, `/v1/software-releases/{id}` | `component_id`, `source_id` | Signed releases of a component; version and source may be unknown. |
-| `/v1/binary-component-assertions`, `/v1/binary-component-assertions/{id}` | `binary_id`, `software_release_id` | Signed claims of how a binary relates to a release. |
-| `/v1/behavioural-compositions`, `/v1/behavioural-compositions/{id}` | `member_type` + `member_id` (compositions containing that binary or function) | Signed sets or sequences of binaries and functions; `members` on `/{id}` only. |
+| `/v1/software-releases`, `/v1/software-releases/{id}` | `component_id`, `source_id` | Signed releases of a component; version and source may be unknown. `ancestor_revoked` when the component or source is revoked. |
+| `/v1/binary-component-assertions`, `/v1/binary-component-assertions/{id}` | `binary_id`, `software_release_id` | Signed claims of how a binary relates to a release. `ancestor_revoked` when the binary, release, its component or the evidence is revoked. |
+| `/v1/behavioural-compositions`, `/v1/behavioural-compositions/{id}` | `member_type` + `member_id` (compositions containing that binary or function) | Signed sets or sequences of binaries and functions; `members` on `/{id}` only. `ancestor_revoked` when a member or the evidence is revoked. |
 | `/v1/flags`, `/v1/flags/{id}` | `target_type`, `target_id` | Viewer flags on objects, accounts, flags or responses, in the exact shape `respond-flag` signs. |
 | `/v1/flag-responses`, `/v1/flag-responses/{id}` | `flag_id` | Analyst responses to flags. |
 | `/v1/revocations`, `/v1/revocations/{id}` | see Revocations | Revocation requests and moderator decisions. |
@@ -166,7 +166,7 @@ storage are decided.
 | `POST` | `/v1/software-components` | Analyst · Signed | `{component_id, analyst_id, name, component_kind, namespace?, purl?, signature}`: name a component. `purl` must be a package URL (`pkg:type/...`). Immutable. `403` bad signature; `409` ID reused. |
 | `POST` | `/v1/software-releases` | Analyst · Signed | `{software_release_id, analyst_id, component_id, version?, source_id?, signature}`: a release of a component. `409` ID reused, or the component or source is revoked; `422` unknown component or source. |
 | `POST` | `/v1/binary-component-assertions` | Analyst · Signed | `{binary_component_assertion_id, analyst_id, binary_id, software_release_id, relationship, basis, confidence?, evidence_provenance_id?, signature}`: `relationship` is `build_of`, `statically_contains`, `dynamically_links`, `derived_from` or `other`. `409` ID reused, or the binary, release or its component is revoked; `422` unknown binary, release or evidence. |
-| `POST` | `/v1/behavioural-compositions` | Analyst · Signed | `{behavioural_composition_id, analyst_id, name, description?, evidence_provenance_id?, members: [{target_type (binary\|function), target_id, member_role, sequence_number?}], signature}`: 1 to 500 distinct members, signed together with the composition in any order. Written with all its members in one transaction; the database refuses members added later. `409` ID reused or a member revoked; `422` unknown member or evidence. |
+| `POST` | `/v1/behavioural-compositions` | Analyst · Signed | `{behavioural_composition_id, analyst_id, name, description?, evidence_provenance_id?, members: [{target_type (binary\|function), target_id, member_role, sequence_number?}], signature}`: 1 to 500 distinct members, signed together with the composition in any order; each `sequence_number` at most once. Written with all its members in one transaction; the database refuses members added later. `409` ID reused, or a member or the evidence revoked; `422` unknown member or evidence. |
 
 ### Flags
 

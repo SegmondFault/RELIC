@@ -277,11 +277,19 @@ revoked.
 - `POST /v1/behavioural-compositions` with those values, the members as a
   list, and `signature`
 
-1 to 500 distinct members. The composition and its members are written in
+1 to 500 distinct members, each `sequence_number` used at most once (the
+database enforces it too). The composition and its members are written in
 one transaction and the database refuses a member added later (the row
 states its `member_count`, checked when the transaction commits), so the
 stored membership is always the signed one. Refused (`409`) when a member is
 revoked.
+
+Every claim that cites `evidence_provenance_id` (licence assertions,
+binary-component assertions, compositions) is refused (`409`) when that
+provenance is revoked. Reads of releases, binary-component assertions and
+compositions carry `ancestor_revoked`: true when a row they depend on (their
+component, release, source, binary, member or evidence) is revoked, while
+`revoked` still reports only the row itself.
 
 ## Client
 

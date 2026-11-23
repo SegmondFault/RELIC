@@ -110,6 +110,26 @@ def _revoked(target_type: str, key: str) -> str:
     ) AS revoked"""
 
 
+def _is_revoked(target_type: str, expression: str) -> str:
+    """Whether an approved revocation targets the row ``expression`` names (constant SQL)."""
+    return f"""EXISTS (
+        SELECT 1 FROM catalogue.revocation AS r
+         WHERE r.target_type = '{target_type}'
+           AND r.target_id = {expression}
+           AND r.decision = 'approved')"""
+
+
+def _ancestor_revoked(*conditions: str) -> str:
+    """Whether a row this one depends on is revoked: the row itself stays as stored."""
+    return "(" + "\n        OR ".join(conditions) + ") AS ancestor_revoked"
+
+
+_RELEASE_COMPONENT = (
+    "(SELECT sr.component_id FROM catalogue.software_release AS sr"
+    " WHERE sr.software_release_id = t.software_release_id)"
+)
+
+
 @dataclass(frozen=True)
 class _Resource:
     table: str  # schema-qualified table, aliased as t
@@ -292,7 +312,11 @@ SOFTWARE_RELEASES = _Resource(
     name="Software release",
     columns=f"""t.software_release_id, t.component_id, t.version, t.source_id, t.created_at,
         t.created_by_analyst_id, encode(t.signature, 'hex') AS signature,
-        {_revoked('software_release', 'software_release_id')}""",
+        {_revoked('software_release', 'software_release_id')},
+        {_ancestor_revoked(
+            _is_revoked('software_component', 't.component_id'),
+            _is_revoked('source', 't.source_id'),
+        )}""",
 )
 
 BINARY_COMPONENT_ASSERTIONS = _Resource(
@@ -303,7 +327,13 @@ BINARY_COMPONENT_ASSERTIONS = _Resource(
         t.relationship::text AS relationship, t.basis::text AS basis,
         t.confidence::text AS confidence, t.evidence_provenance_id, t.created_at,
         t.submitted_by_analyst_id, encode(t.signature, 'hex') AS signature,
-        {_revoked('binary_component_assertion', 'binary_component_assertion_id')}""",
+        {_revoked('binary_component_assertion', 'binary_component_assertion_id')},
+        {_ancestor_revoked(
+            _is_revoked('binary', 't.binary_id'),
+            _is_revoked('software_release', 't.software_release_id'),
+            _is_revoked('software_component', _RELEASE_COMPONENT),
+            _is_revoked('provenance', 't.evidence_provenance_id'),
+        )}""",
 )
 
 BEHAVIOURAL_COMPOSITIONS = _Resource(
@@ -313,7 +343,16 @@ BEHAVIOURAL_COMPOSITIONS = _Resource(
     columns=f"""t.behavioural_composition_id, t.name, t.description, t.evidence_provenance_id,
         t.member_count, t.created_at, t.submitted_by_analyst_id,
         encode(t.signature, 'hex') AS signature,
-        {_revoked('behavioural_composition', 'behavioural_composition_id')}""",
+        {_revoked('behavioural_composition', 'behavioural_composition_id')},
+        {_ancestor_revoked(
+            _is_revoked('provenance', 't.evidence_provenance_id'),
+            """EXISTS (
+            SELECT 1 FROM catalogue.composition_member AS am
+              JOIN catalogue.revocation AS ar
+                ON ar.target_type = am.target_type AND ar.target_id = am.target_id
+               AND ar.decision = 'approved'
+             WHERE am.behavioural_composition_id = t.behavioural_composition_id)""",
+        )}""",
     detail="""coalesce((
         SELECT json_agg(json_build_object(
                    'target_type', m.target_type, 'target_id', m.target_id,

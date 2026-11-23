@@ -19,7 +19,8 @@ itself executable behaviour.
 
 `member_role` records why a member matters, for example `loader`, `decoder`,
 `payload`, `persistence` or `c2`. `sequence_number` starts at zero when order is
-asserted and remains `NULL` for an unordered set.
+asserted and remains `NULL` for an unordered set. Each position is used at most
+once in a composition.
 
 ## Admission and correction
 

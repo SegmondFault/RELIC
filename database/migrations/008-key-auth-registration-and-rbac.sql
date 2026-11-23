@@ -565,6 +565,21 @@ ALTER TABLE classification
 COMMENT ON COLUMN classification.evidence_json IS
     'Evidence JSON exactly as signed; evidence is the same value as jsonb.';
 
+-- Revoked provenance is no evidence: a claim may not cite it.
+CREATE FUNCTION reject_revoked_evidence(evidence_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF evidence_id IS NOT NULL AND target_is_revoked('provenance', evidence_id) THEN
+        RAISE EXCEPTION 'Evidence provenance % is revoked', evidence_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+END;
+$$;
+
 -- Like flags: nothing new is asserted about a revoked target, and created_at
 -- comes from the database clock.
 CREATE FUNCTION guard_license_assertion()
@@ -578,6 +593,7 @@ BEGIN
         RAISE EXCEPTION 'Target % is revoked', coalesce(NEW.source_id, NEW.binary_id)
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
     NEW.created_at := clock_timestamp();
     RETURN NEW;
 END;
@@ -643,6 +659,12 @@ ALTER TABLE behavioural_composition
     ADD CONSTRAINT behavioural_composition_description_nonblank
         CHECK (description IS NULL OR btrim(description) <> '');
 
+-- An asserted order names each position once; unordered members (NULL) are
+-- free.
+CREATE UNIQUE INDEX composition_member_sequence_idx
+    ON composition_member (behavioural_composition_id, sequence_number)
+    WHERE sequence_number IS NOT NULL;
+
 COMMENT ON COLUMN behavioural_composition.member_count IS
     'Number of members, all signed with the composition and written in its transaction.';
 
@@ -702,6 +724,7 @@ BEGIN
         RAISE EXCEPTION 'Software release % or its component is revoked', NEW.software_release_id
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
     NEW.created_at := clock_timestamp();
     RETURN NEW;
 END;
@@ -711,9 +734,21 @@ CREATE TRIGGER binary_component_assertion_target_not_revoked
 BEFORE INSERT ON binary_component_assertion
 FOR EACH ROW EXECUTE FUNCTION guard_binary_component_assertion();
 
+CREATE FUNCTION guard_behavioural_composition()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER behavioural_composition_stamped
 BEFORE INSERT ON behavioural_composition
-FOR EACH ROW EXECUTE FUNCTION stamp_created_at();
+FOR EACH ROW EXECUTE FUNCTION guard_behavioural_composition();
 
 CREATE FUNCTION guard_composition_member()
 RETURNS trigger

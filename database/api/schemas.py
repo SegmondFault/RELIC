@@ -627,6 +627,10 @@ class SoftwareRelease(BaseModel):
     created_by_analyst_id: UUID
     signature: Signature
     revoked: bool
+    ancestor_revoked: bool = Field(
+        description="A row this one depends on (component, release, source, binary, "
+        "member or evidence) is revoked; this row itself is unchanged"
+    )
 
 
 class BinaryComponentAssertionSubmission(_Request):
@@ -655,6 +659,10 @@ class BinaryComponentAssertion(BaseModel):
     submitted_by_analyst_id: UUID
     signature: Signature
     revoked: bool
+    ancestor_revoked: bool = Field(
+        description="A row this one depends on (component, release, source, binary, "
+        "member or evidence) is revoked; this row itself is unchanged"
+    )
 
 
 class CompositionMemberIn(_Request):
@@ -686,6 +694,9 @@ class BehaviouralCompositionSubmission(_Request):
         ]
         if len(keys) != len(set(keys)):
             raise ValueError("members must be distinct")
+        positions = [m.sequence_number for m in self.members if m.sequence_number is not None]
+        if len(positions) != len(set(positions)):
+            raise ValueError("each sequence_number may be used once")
         return self
 
 
@@ -706,6 +717,10 @@ class BehaviouralComposition(BaseModel):
     submitted_by_analyst_id: UUID
     signature: Signature
     revoked: bool
+    ancestor_revoked: bool = Field(
+        description="A row this one depends on (component, release, source, binary, "
+        "member or evidence) is revoked; this row itself is unchanged"
+    )
 
 
 class BehaviouralCompositionDetail(BehaviouralComposition):
