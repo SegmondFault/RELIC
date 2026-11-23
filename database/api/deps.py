@@ -31,7 +31,10 @@ async def get_conn(request: Request) -> AsyncIterator[AsyncConnection]:
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
-ConnDep = Annotated[AsyncConnection, Depends(get_conn)]
+# Returned to the pool when the handler returns, not when the response has
+# been sent: a streamed download must not hold a connection for its whole
+# transfer (a few slow clients would otherwise exhaust the pool).
+ConnDep = Annotated[AsyncConnection, Depends(get_conn, scope="function")]
 
 
 def unauthorised(detail: str = "Authentication required") -> HTTPException:
@@ -121,6 +124,10 @@ async def current_identity(
     The account is re-read on every request, so a revocation takes effect
     immediately rather than when the token expires.
     """
+    return await _resolve_identity(request, conn, user_id)
+
+
+async def _resolve_identity(request: Request, conn: AsyncConnection, user_id: UUID) -> Identity:
     cur = await conn.execute(IDENTITY_QUERY, (user_id,))
     row = await cur.fetchone()
     if row is None or row["revoked"] or row["owner_type"] != "human" or row["role"] is None:
@@ -139,8 +146,27 @@ async def current_identity(
 CurrentIdentity = Annotated[Identity, Depends(current_identity)]
 
 
-def require_roles(*roles: str) -> Callable[[Identity], Awaitable[Identity]]:
-    async def dependency(identity: CurrentIdentity) -> Identity:
+async def identity_without_connection(
+    request: Request,
+    user_id: Annotated[UUID, Depends(token_subject)],
+) -> Identity:
+    """Like ``current_identity``, but borrows a connection only for the lookup.
+
+    For handlers that spend long without the database (a streamed upload):
+    they must not hold a pooled connection meanwhile.
+    """
+    async with request.app.state.pool.connection() as conn:
+        return await _resolve_identity(request, conn, user_id)
+
+
+def require_roles(
+    *roles: str, hold_connection: bool = True
+) -> Callable[[Identity], Awaitable[Identity]]:
+    resolve = current_identity if hold_connection else identity_without_connection
+
+    # A default, not an Annotated hint: with postponed annotations FastAPI
+    # could not resolve the local ``resolve`` inside a string.
+    async def dependency(identity: Identity = Depends(resolve)) -> Identity:
         if identity.role not in roles:
             raise HTTPException(status_code=403, detail="Role not permitted for this operation")
         return identity

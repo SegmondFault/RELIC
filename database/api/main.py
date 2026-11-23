@@ -107,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth, accounts, registrations, catalogue, submissions, components, flags, revocations
     ):
         v1.include_router(module.router)
+    v1.include_router(submissions.upload_router)
     app.include_router(v1)
 
     return app

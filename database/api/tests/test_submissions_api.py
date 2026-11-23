@@ -548,3 +548,37 @@ def test_worker_refuses_to_start_with_the_wrong_integrity_key(database, object_d
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode != 0 and "integrity account" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Long transfers hold no database connection
+# ---------------------------------------------------------------------------
+
+
+def _connections_in_use(app) -> int:
+    stats = app.state.pool.get_stats()
+    return stats["pool_size"] - stats["pool_available"]
+
+
+def test_transfers_hold_no_pooled_connection(client, database, object_dirs, setup, monkeypatch):
+    """A slow upload or download must not keep a connection from the pool of 10:
+    a few slow clients would otherwise make every route fail."""
+    from api.routers import catalogue, submissions
+
+    seen: dict[str, int] = {}
+    receive, read_chunks = submissions._receive_object, catalogue._read_chunks
+
+    async def receiving(*args, **kwargs):
+        seen["upload"] = _connections_in_use(client.app)
+        return await receive(*args, **kwargs)
+
+    def reading(descriptor):
+        seen["download"] = _connections_in_use(client.app)
+        yield from read_chunks(descriptor)
+
+    monkeypatch.setattr(submissions, "_receive_object", receiving)
+    monkeypatch.setattr(catalogue, "_read_chunks", reading)
+    fidbf = admitted_fidbf(client, database, object_dirs, setup)
+    assert client.get(f"/v1/fidbf/{fidbf.ids['fidbf']}/download",
+                      headers=setup.headers).content == fidbf.data
+    assert seen == {"upload": 0, "download": 0}

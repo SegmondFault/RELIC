@@ -62,6 +62,10 @@ from .catalogue import CLASSIFICATIONS, LICENSE_ASSERTIONS
 AnalystDep = Annotated[Identity, Depends(require_roles("analyst"))]
 
 router = APIRouter(dependencies=[Depends(current_identity)], tags=["submissions"])
+# Uploads stream for minutes without the database, so this router holds no
+# pooled connection: the caller is resolved with a briefly borrowed one.
+upload_router = APIRouter(tags=["submissions"])
+UploaderDep = Annotated[Identity, Depends(require_roles("analyst", hold_connection=False))]
 audit = logging.getLogger("relic.audit")
 
 
@@ -329,7 +333,7 @@ def _staging_bytes(settings: Settings) -> int:
 _DAY = 24 * 3600.0
 
 
-@router.put(
+@upload_router.put(
     "/fidbf-objects/{sha256}", status_code=201, response_model=StagedObject,
     responses={200: {"description": "Already staged"}},
 )
@@ -337,7 +341,7 @@ async def upload_fidbf_object(
     sha256: Annotated[str, PathParam(pattern=r"^[0-9a-f]{64}$")],
     request: Request,
     response: Response,
-    analyst: AnalystDep,
+    analyst: UploaderDep,
     settings: SettingsDep,
 ):
     """Upload a FIDBF object (raw bytes, with ``Content-Length``) before its manifest.
