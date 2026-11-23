@@ -12,15 +12,19 @@ paths are never returned.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import os
+import re
+import stat
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi.responses import StreamingResponse
 from psycopg import sql
 
-from ..deps import ConnDep, current_identity
+from ..deps import ConnDep, CurrentIdentity, SettingsDep, current_identity
 from ..schemas import (
     Batch,
     BehaviouralComposition,
@@ -51,7 +55,6 @@ from ..schemas import (
     TargetType,
     UserPublic,
 )
-from ._stubs import todo
 
 # Every catalogue read requires an authenticated, non-revoked human account.
 router = APIRouter(tags=["catalogue"], dependencies=[Depends(current_identity)])
@@ -253,7 +256,7 @@ BSIM = _Resource(
     name="BSim object",
     columns=f"""t.bsim_id, t.source_id, t.sha256, t.md5, t.created_at, t.submitted_by_user_id,
         encode(t.signature, 'hex') AS signature, {_revoked('bsim', 'bsim_id')}""",
-    detail="t.object_data",
+    detail="t.object_data, t.object_json",
 )
 
 FUNCTION_BSIM = _Resource(
@@ -271,7 +274,7 @@ PROVENANCE = _Resource(
         t.submitted_by_user_id, encode(t.signature, 'hex') AS signature,
         (t.object_data IS NOT NULL) AS has_object_data,
         {_revoked('provenance', 'provenance_id')}""",
-    detail="t.object_data",
+    detail="t.object_data, t.object_json",
 )
 
 LICENSE_ASSERTIONS = _Resource(
@@ -490,10 +493,76 @@ async def get_fidbf(fidbf_id: UUID, conn: ConnDep):
     return await _get(conn, FIDBF, fidbf_id)
 
 
-@router.get("/fidbf/{fidbf_id}/download")
-async def download_fidbf(fidbf_id: UUID):
-    # Waits for the object-storage design.
-    todo()
+_CANONICAL_STORAGE = re.compile(r"[0-9a-f]{2}/([0-9a-f]{64})\.fidbf")
+_CHUNK = 1 << 16
+
+
+def _read_chunks(descriptor: int) -> Iterator[bytes]:
+    try:
+        while chunk := os.read(descriptor, _CHUNK):
+            yield chunk
+    finally:
+        os.close(descriptor)
+
+
+@router.get(
+    "/fidbf/{fidbf_id}/download",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/octet-stream": {}}}},
+)
+async def download_fidbf(
+    fidbf_id: UUID,
+    request: Request,
+    identity: CurrentIdentity,
+    conn: ConnDep,
+    settings: SettingsDep,
+):
+    """The FIDBF object's exact bytes.
+
+    ``X-Content-SHA256`` and ``X-Content-MD5`` carry the catalogue's digests
+    (also in ``GET /v1/fidbf/{id}``) for the client to check. ``404`` for an
+    unknown FIDBF or one admitted before the object store existed; ``410``
+    once revoked (Moderators can still download it, to investigate);
+    ``429`` past ``download_rate_limit_per_hour`` downloads by this account.
+    """
+    retry_after = request.app.state.rate_limiter.hit(
+        "download", str(identity.user_id), settings.download_rate_limit_per_hour, 3600
+    )
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429, detail="Too many downloads",
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
+    cur = await conn.execute(
+        f"SELECT storage_path, sha256::text AS sha256, md5::text AS md5,"
+        f" {_revoked('fidbf', 'fidbf_id')} FROM catalogue.fidbf AS t WHERE fidbf_id = %s",
+        (fidbf_id,),
+    )
+    row = await cur.fetchone()
+    if row is not None and row["revoked"] and identity.role != "moderator":
+        raise HTTPException(status_code=410, detail="FIDBF object has been revoked")
+    match = _CANONICAL_STORAGE.fullmatch(row["storage_path"]) if row else None
+    if match is None or match.group(1) != row["sha256"]:
+        raise HTTPException(status_code=404, detail="FIDBF object not available")
+    try:
+        descriptor = os.open(settings.fidbf_root / row["storage_path"], os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise HTTPException(status_code=404, detail="FIDBF object not available") from error
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(descriptor)
+        raise HTTPException(status_code=404, detail="FIDBF object not available")
+    return StreamingResponse(
+        _read_chunks(descriptor),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(info.st_size),
+            "Content-Disposition": f'attachment; filename="{fidbf_id}.fidbf"',
+            "ETag": f'"{row["sha256"]}"',
+            "X-Content-SHA256": row["sha256"],
+            "X-Content-MD5": row["md5"],
+        },
+    )
 
 
 @router.get("/bsim", response_model=list[Bsim])

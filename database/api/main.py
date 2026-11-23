@@ -23,7 +23,13 @@ from .routers import (
     revocations,
     submissions,
 )
-from .security import BodySizeLimitMiddleware, RateLimiter, SecurityHeadersMiddleware
+from .security import (
+    BodySizeLimitMiddleware,
+    ByteBudget,
+    RateLimiter,
+    SecurityHeadersMiddleware,
+    UploadSlots,
+)
 
 log = logging.getLogger("relic.api")
 
@@ -66,10 +72,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.rate_limiter = RateLimiter()
+    app.state.upload_slots = UploadSlots()
+    app.state.upload_budget = ByteBudget()
 
     # add_middleware prepends: SecurityHeaders (added last) is outermost and
     # also covers 413 responses produced by the body limit.
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_body_bytes,
+        larger=[
+            ("/v1/fidbf-objects", settings.max_object_bytes),
+            ("/v1/fidbf", settings.max_submission_bytes),
+            ("/v1/bsim", settings.max_submission_bytes),
+            ("/v1/provenance", settings.max_submission_bytes),
+        ],
+    )
     app.add_middleware(SecurityHeadersMiddleware, allow_docs=docs)
 
     @app.exception_handler(PoolTimeout)

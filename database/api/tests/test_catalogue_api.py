@@ -29,6 +29,16 @@ def _hex(n: int) -> str:
     return secrets.token_hex(n)
 
 
+BSIM_JSON = '{"features": [1, 2, 3]}'
+SEAL_JSON = '{"class_uid": 1, "unmapped": {"relic": {"recipe": "make"}}}'
+
+
+def _digests(text: str) -> tuple[str, str]:
+    """SHA-256 and MD5 of an object's exact text, as the database requires."""
+    data = text.encode()
+    return hashlib.sha256(data).hexdigest(), hashlib.md5(data).hexdigest()
+
+
 @dataclass
 class Corpus:
     analyst: User
@@ -96,9 +106,10 @@ def corpus(database) -> Corpus:
         )
     bsim_id, function_bsim_id = uuid.uuid4(), uuid.uuid4()
     run(
-        "INSERT INTO catalogue.bsim (bsim_id, object_data, sha256, md5, submitted_by_user_id,"
-        " signature, source_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (bsim_id, Jsonb({"features": [1, 2, 3]}), _hex(32), _hex(16), analyst.user_id, sig, source_id),
+        "INSERT INTO catalogue.bsim (bsim_id, object_data, object_json, sha256, md5,"
+        " submitted_by_user_id, signature, source_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (bsim_id, Jsonb(json.loads(BSIM_JSON)), BSIM_JSON, *_digests(BSIM_JSON),
+         analyst.user_id, sig, source_id),
     )
     run(
         "INSERT INTO catalogue.function_bsim (function_bsim_id, function_id, binary_id, bsim_id)"
@@ -108,11 +119,12 @@ def corpus(database) -> Corpus:
     provenance_id = uuid.uuid4()
     run(
         "INSERT INTO catalogue.provenance (provenance_id, fidbf_id, binary_id, schema_name,"
-        " schema_version, storage_path, object_data, sha256, md5, submitted_by_user_id,"
-        " signature, source_id) VALUES (%s, %s, %s, 'ocsf', '1.3.0', %s, %s, %s, %s, %s, %s, %s)",
+        " schema_version, storage_path, object_data, object_json, sha256, md5,"
+        " submitted_by_user_id, signature, source_id)"
+        " VALUES (%s, %s, %s, 'ocsf', '1.3.0', %s, %s, %s, %s, %s, %s, %s, %s)",
         (provenance_id, fidbf_id, binary_id, SECRET_PATH + ".json",
-         Jsonb({"class_uid": 1, "unmapped": {"relic": {"recipe": "make"}}}),
-         _hex(32), _hex(16), analyst.user_id, sig, source_id),
+         Jsonb(json.loads(SEAL_JSON)), SEAL_JSON, *_digests(SEAL_JSON),
+         analyst.user_id, sig, source_id),
     )
     license_assertion_id = uuid.uuid4()
     run(
@@ -343,8 +355,21 @@ def test_invalid_parameters_are_422(client, corpus, headers, path):
     assert client.get(path, headers=headers).status_code == 422
 
 
-def test_download_is_still_501(client, corpus, headers):
-    assert client.get(f"/v1/fidbf/{corpus.fidbf_id}/download", headers=headers).status_code == 501
+def test_download_needs_a_stored_object(client, database, corpus, headers):
+    """A FIDBF whose storage_path is not a content-addressed store path (one
+    admitted before the store existed) cannot be downloaded, and the path
+    never leaks; unknown IDs are 404 too. Its own row: other tests revoke
+    the shared corpus FIDBF."""
+    fidbf_id = uuid.uuid4()
+    database.execute(
+        "INSERT INTO catalogue.fidbf (fidbf_id, binary_id, storage_path, sha256, md5,"
+        " submitted_by_user_id, signature, source_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (fidbf_id, corpus.binary_id, SECRET_PATH + ".legacy.fidbf", _hex(32), _hex(16),
+         corpus.analyst.user_id, b"\x11" * 64, corpus.source_id),
+    )
+    response = client.get(f"/v1/fidbf/{fidbf_id}/download", headers=headers)
+    assert response.status_code == 404 and SECRET_PATH not in response.text
+    assert client.get(f"/v1/fidbf/{uuid.uuid4()}/download", headers=headers).status_code == 404
 
 
 # ---------------------------------------------------------------------------

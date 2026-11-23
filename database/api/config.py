@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+from pathlib import Path
 
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -33,6 +34,26 @@ class Settings(BaseSettings):
     statement_timeout_ms: int = Field(5000, ge=100)
 
     max_body_bytes: int = Field(64 * 1024, ge=1024)
+    # FIDBF manifests and BSim/provenance submissions (JSON).
+    max_submission_bytes: int = Field(4 * 1024 * 1024, ge=1024)
+    # One uploaded FIDBF object.
+    max_object_bytes: int = Field(64 * 1024 * 1024, ge=1024)
+    # All staged uploads together; uploads beyond it are refused (507). Also
+    # put the staging directory on its own, smaller filesystem
+    # (docs/deployment.md): this cap is enforced by the API, a filesystem
+    # limit holds even if the API is compromised.
+    max_staging_bytes: int = Field(4 * 1024 * 1024 * 1024, ge=1024)
+    # Uploads in progress at once, per Analyst and in total (slow clients
+    # cannot tie up the API), and bytes one Analyst may upload per 24 hours.
+    max_uploads_per_analyst: int = Field(2, ge=1)
+    max_uploads_total: int = Field(8, ge=1)
+    upload_bytes_per_analyst_per_day: int = Field(1024 * 1024 * 1024, ge=1024)
+    # FIDBF downloads per account per hour.
+    download_rate_limit_per_hour: int = Field(120, ge=1)
+    # Uploaded FIDBF objects wait here for relic-admit (read-write mount).
+    staging_dir: Path = Path("/var/lib/relic/staging")
+    # The content-addressed FIDBF object store (read-only mount).
+    fidbf_root: Path = Path("/srv/relic-objects")
     global_rate_limit_per_minute: int = Field(300, ge=1)
     auth_rate_limit_per_minute: int = Field(10, ge=1)
     registration_rate_limit_per_hour: int = Field(5, ge=1)

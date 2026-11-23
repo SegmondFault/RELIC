@@ -38,6 +38,7 @@ from api.crypto import (
 
 from .conftest import REPO, User, login, sign
 from .test_auth_api import SIGNER, _login_with_cli
+from .test_catalogue_api import _digests
 from .test_claims_api import Objects, analyst, analyst_headers, bearer, classification_body, objects
 from .test_revocations_api import _ssh_user
 
@@ -687,11 +688,12 @@ def test_ancestor_revoked_marks_rows_built_on_a_revoked_row(
 def _provenance(database, objects: Objects) -> uuid.UUID:
     provenance_id = uuid.uuid4()
     owner = database.create_user("analyst")
+    seal = '{"class_uid": 1}'
     database.execute(
         "INSERT INTO catalogue.provenance (provenance_id, binary_id, schema_name, schema_version,"
-        " object_data, sha256, md5, submitted_by_user_id, signature, source_id)"
-        " VALUES (%s, %s, 'ocsf', '1.3.0', '{\"class_uid\": 1}', %s, %s, %s, %s, %s)",
-        (provenance_id, objects.binary_id, uuid.uuid4().hex * 2, uuid.uuid4().hex,
+        " object_data, object_json, sha256, md5, submitted_by_user_id, signature, source_id)"
+        " VALUES (%s, %s, 'ocsf', '1.3.0', %s::jsonb, %s, %s, %s, %s, %s, %s)",
+        (provenance_id, objects.binary_id, seal, seal, *_digests(seal),
          owner.user_id, b"\x11" * 64, objects.source_id),
     )
     return provenance_id

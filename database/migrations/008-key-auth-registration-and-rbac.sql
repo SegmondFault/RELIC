@@ -72,6 +72,11 @@ ALTER ROLE relic_auditor IN DATABASE relic SET default_transaction_read_only = o
 SET ROLE relic_owner;
 SET search_path = catalogue, public;
 
+-- Tables created from here on (including this migration's own) give relic_app
+-- no INSERT or UPDATE unless a GRANT below says so. Revoked first, before any
+-- CREATE TABLE: relic-access-v1.sql's default would otherwise grant both.
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FROM relic_app;
+
 -- ---------------------------------------------------------------------------
 -- Account identity
 -- ---------------------------------------------------------------------------
@@ -810,6 +815,181 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION check_composition_complete();
 
 -- ---------------------------------------------------------------------------
+-- BSim and provenance objects, staged submissions
+-- ---------------------------------------------------------------------------
+
+-- A BSim object or provenance seal is signed as the exact JSON text the
+-- Analyst submitted (jsonb reorders keys and rewrites numbers). That text is
+-- kept verbatim, must parse to the stored jsonb, and the stored SHA-256 and
+-- MD5 are its digests, so the row cannot disagree with what was signed.
+ALTER TABLE bsim
+    ADD COLUMN object_json text NOT NULL,
+    ADD CONSTRAINT bsim_object_verbatim CHECK (object_json::jsonb = object_data),
+    ADD CONSTRAINT bsim_object_is_json_object CHECK (jsonb_typeof(object_data) = 'object'),
+    ADD CONSTRAINT bsim_digests_match_object CHECK (
+        sha256::text = encode(sha256(convert_to(object_json, 'UTF8')), 'hex')
+        AND md5::text = md5(convert_to(object_json, 'UTF8')));
+
+COMMENT ON COLUMN bsim.object_json IS
+    'The BSim object exactly as signed; object_data is the same value as jsonb, sha256 and md5 are its digests.';
+
+ALTER TABLE provenance
+    ADD COLUMN object_json text,
+    ADD CONSTRAINT provenance_object_verbatim CHECK (
+        (object_json IS NULL) = (object_data IS NULL)
+        AND (object_json IS NULL OR object_json::jsonb = object_data)),
+    ADD CONSTRAINT provenance_digests_match_object CHECK (
+        object_json IS NULL
+        OR (sha256::text = encode(sha256(convert_to(object_json, 'UTF8')), 'hex')
+            AND md5::text = md5(convert_to(object_json, 'UTF8'))));
+
+COMMENT ON COLUMN provenance.object_json IS
+    'The inline seal exactly as signed; object_data is the same value as jsonb, sha256 and md5 are its digests.';
+
+-- Nothing new is admitted on a revoked source, binary, function or object.
+CREATE FUNCTION guard_bsim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id) THEN
+        RAISE EXCEPTION 'Source % is revoked', NEW.source_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER bsim_target_not_revoked
+BEFORE INSERT ON bsim
+FOR EACH ROW EXECUTE FUNCTION guard_bsim();
+
+CREATE FUNCTION guard_function_bsim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('function', NEW.function_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Function % or its binary is revoked', NEW.function_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER function_bsim_target_not_revoked
+BEFORE INSERT ON function_bsim
+FOR EACH ROW EXECUTE FUNCTION guard_function_bsim();
+
+CREATE FUNCTION guard_provenance()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id)
+       OR target_is_revoked('fidbf', NEW.fidbf_id)
+       OR target_is_revoked('bsim', NEW.bsim_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'A target of provenance % is revoked', NEW.provenance_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER provenance_target_not_revoked
+BEFORE INSERT ON provenance
+FOR EACH ROW EXECUTE FUNCTION guard_provenance();
+
+-- The API never holds the integrity key, so it cannot admit FIDBF, BSim or
+-- provenance (each takes an integrity-chain entry). It stages the signed
+-- submission here instead; relic-admit, running on the host as
+-- relic_worker, verifies and admits it, or rejects it, and records which.
+-- The submission ID is the ID of the object it creates.
+CREATE TYPE submission_kind AS ENUM ('fidbf', 'bsim', 'provenance');
+CREATE TYPE submission_status AS ENUM ('pending', 'admitted', 'rejected');
+
+CREATE TABLE submission (
+    submission_id uuid PRIMARY KEY,
+    kind submission_kind NOT NULL,
+    analyst_id uuid NOT NULL REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    payload_json text NOT NULL CHECK (octet_length(payload_json) <= 8388608),
+    object_sha256 sha256_hex,
+    received_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    status submission_status NOT NULL DEFAULT 'pending',
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    decided_at timestamptz,
+    result jsonb,
+    error text,
+    CHECK ((kind = 'fidbf') = (object_sha256 IS NOT NULL)),
+    CHECK ((status = 'pending') = (decided_at IS NULL)),
+    CHECK ((status = 'admitted') = (result IS NOT NULL)),
+    CHECK ((status = 'rejected') = (error IS NOT NULL))
+);
+
+COMMENT ON TABLE submission IS
+    'Signed FIDBF, BSim and provenance submissions staged by the API and admitted or rejected by relic-admit.';
+COMMENT ON COLUMN submission.payload_json IS
+    'The request body exactly as received; relic-admit parses and verifies it.';
+COMMENT ON COLUMN submission.object_sha256 IS
+    'FIDBF only: the staged object, uploaded before the manifest.';
+
+CREATE INDEX submission_pending_idx ON submission (received_at) WHERE status = 'pending';
+CREATE INDEX submission_analyst_idx ON submission (analyst_id, submission_id);
+CREATE INDEX submission_object_idx ON submission (object_sha256) WHERE status = 'pending';
+
+CREATE TRIGGER submission_requires_analyst
+BEFORE INSERT ON submission
+FOR EACH ROW EXECUTE FUNCTION require_actor_role('analyst_id', 'analyst');
+
+-- Only a pending submission changes, only its outcome, and only once.
+CREATE FUNCTION guard_submission()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Submissions are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'pending' OR NEW.attempts <> 0 THEN
+            RAISE EXCEPTION 'A submission starts pending'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        NEW.received_at := clock_timestamp();
+        RETURN NEW;
+    END IF;
+    IF OLD.status <> 'pending' THEN
+        RAISE EXCEPTION 'Submission % is already %', OLD.submission_id, OLD.status
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.submission_id <> OLD.submission_id
+       OR NEW.kind <> OLD.kind
+       OR NEW.analyst_id <> OLD.analyst_id
+       OR NEW.payload_json <> OLD.payload_json
+       OR NEW.object_sha256 IS DISTINCT FROM OLD.object_sha256
+       OR NEW.received_at <> OLD.received_at THEN
+        RAISE EXCEPTION 'A submission cannot be altered'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.status <> 'pending' THEN
+        NEW.decided_at := clock_timestamp();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER submission_is_append_only
+BEFORE INSERT OR UPDATE OR DELETE ON submission
+FOR EACH ROW EXECUTE FUNCTION guard_submission();
+
+-- ---------------------------------------------------------------------------
 -- Two-Moderator approval for Moderator powers
 -- ---------------------------------------------------------------------------
 
@@ -1346,10 +1526,13 @@ REVOKE INSERT ON
     binary_component_assertion, behavioural_composition, composition_member,
     classification
 FROM relic_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FROM relic_app;
 
 -- POST /v1/license-assertions and POST /v1/classifications.
 GRANT INSERT ON license_assertion, classification TO relic_app;
+
+-- PUT /v1/fidbf-objects and POST /v1/fidbf, /v1/bsim, /v1/provenance stage
+-- submissions; reading their status is the submitter's.
+GRANT SELECT, INSERT ON submission TO relic_app;
 
 -- POST /v1/software-components, /v1/software-releases,
 -- /v1/binary-component-assertions and /v1/behavioural-compositions.
@@ -1371,12 +1554,20 @@ GRANT SELECT ON
     integrity, mmr_checkpoint
 TO relic_worker;
 
--- relic-ingest-fidbf admits a source, batch, binary, FIDBF and functions with
--- one integrity entry; relic-chain-bsim appends integrity entries;
--- relic-checkpoint-mmr appends checkpoints. Append-only: no UPDATE or DELETE.
+-- relic-admit (and relic-ingest-fidbf) admit a source, batch, binary, FIDBF
+-- and functions with one integrity entry, and BSim objects (with their
+-- function links) and provenance seals each with one; relic-chain-bsim
+-- appends integrity entries; relic-checkpoint-mmr appends checkpoints.
+-- Append-only: no UPDATE or DELETE.
 GRANT INSERT ON
-    source, batch, binary_record, fidbf, function_record, integrity, mmr_checkpoint
+    source, batch, binary_record, fidbf, function_record, integrity, mmr_checkpoint,
+    bsim, function_bsim, provenance
 TO relic_worker;
+
+-- relic-admit takes staged submissions and records their outcome; it never
+-- changes what was submitted (guard_submission() enforces that too).
+GRANT SELECT ON submission TO relic_worker;
+GRANT UPDATE (status, attempts, decided_at, result, error) ON submission TO relic_worker;
 
 -- Registration proofs are signed over their challenge and decisions over the
 -- request's contact details, so the auditor reads those tables too.

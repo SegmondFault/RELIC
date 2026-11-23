@@ -16,6 +16,11 @@ services:
     # any network. Read-only: connecting to a socket needs no write access.
     volumes:
       - ${RELIC_PG_SOCKET_DIR:-/var/run/postgresql}:/var/run/postgresql:ro
+      # Uploaded FIDBF objects wait here for relic-admit (host, relic_worker).
+      # The only writable mount: the API never writes the object store.
+      - ${RELIC_STAGING_DIR:-/var/lib/relic/staging}:/var/lib/relic/staging
+      # Admitted FIDBF objects, served by GET /v1/fidbf/{id}/download.
+      - ${RELIC_FIDBF_ROOT:-/srv/relic-objects}:/srv/relic-objects:ro
     cap_drop:
       - ALL
     security_opt:
@@ -50,6 +55,7 @@ services:
       RELIC_HOST: ${RELIC_HOST:?RELIC_HOST must be set to the public IP or domain}
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
       ACME_PROFILE: ${ACME_PROFILE:-shortlived}
+      RELIC_READ_BODY_TIMEOUT: ${RELIC_READ_BODY_TIMEOUT:-5m}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -138,7 +138,7 @@ account stays visible, marked revoked.</p>
   <tr><td>Log in, read catalogue (<code>GET /v1/…</code>)</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Flag an object, account, flag or response (once per target)</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Assert licences, classify; name components and releases, link binaries to them, define compositions</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
-  <tr><td>Submit sources, batches, FIDBF, BSim, provenance</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag stub">501</span></td></tr>
+  <tr><td>Submit FIDBF (with source, batch, binary, functions), BSim, provenance: staged, admitted by relic-admit</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Respond to flags</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Request revocation of an object or account</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
   <tr><td>Review and decide registrations (a new Moderator needs two)</td><td class="x">–</td><td class="x">–</td><td class="y">✓</td><td class="x">–</td><td><span class="tag live">live</span></td></tr>
@@ -366,15 +366,19 @@ under <code>flag:v1</code> / <code>flag-signature:v1</code>; an Analyst's respon
   <tr><td>POST</td><td class="mono">/v1/revocations</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature or system account · 409 open request, already revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/revocations/{id}/decision</td><td>Moderator · signed</td><td>200 · 202 first of two (Moderator target) · 403 bad signature or own account · 409 decided; account revocation is immediate</td></tr>
   <tr><td>POST</td><td class="mono">/v1/license-assertions<br>/v1/classifications<br>/v1/software-components<br>/v1/software-releases<br>/v1/binary-component-assertions<br>/v1/behavioural-compositions</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 409 target revoked or ID reused · 422 invalid or unknown target. A composition is signed with all its members and written with them in one transaction; the database refuses members added later</td></tr>
+  <tr><td>PUT</td><td class="mono">/v1/fidbf-objects/{sha256}</td><td>Analyst</td><td>raw object, streamed and hashed into staging (≤ 64 MiB, 2 at a time and 1 GiB/day per Analyst) · 201 · 200 already staged · 411 · 413 · 422 digest mismatch · 429 / 503 too many · 507 staging full</td></tr>
+  <tr><td>POST</td><td class="mono">/v1/fidbf<br>/v1/bsim<br>/v1/provenance</td><td>Analyst · signed</td><td>202 staged with <code>status_url</code> · 200 retry · 403 not the caller · 409 ID reused · 422 invalid or object not uploaded. relic-admit (host, integrity key) verifies and admits with one chain entry, or rejects</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/submissions[/{id}]</td><td>Analyst (own) · Moderator</td><td>pending / admitted / rejected, with result or reason</td></tr>
+  <tr><td>GET</td><td class="mono">/v1/fidbf/{id}/download</td><td>logged in</td><td>exact bytes, <code>X-Content-SHA256</code> to check them · 410 revoked (Moderators excepted) · 429 past 120/h per account</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags</td><td>Viewer · signed</td><td>201 · 200 retry · 403 bad signature · 409 already flagged, target revoked or ID reused · 422 unknown target</td></tr>
   <tr><td>POST</td><td class="mono">/v1/flags/{id}/responses</td><td>Analyst · signed</td><td>201 · 200 retry · 403 bad signature · 404 unknown flag · 409 flag revoked or ID reused</td></tr>
 </table>
-<p class="small muted">Other submissions and <code>/v1/fidbf/{id}/download</code> return <code>501</code>. Filters: <code>database/api/README.md</code>.</p>
+<p class="small muted">Every route is implemented. Filters and bodies: <code>database/api/README.md</code>.</p>
 
 <h2><span class="n">07</span>Security layers, outside in</h2>
 <p>Each layer holds even if the one before it fails: Caddy and the app both set headers; the app and the database both check roles.</p>
 <table class="layers">
-  <tr><td>Containers<span>compose, Dockerfile</span></td><td><span class="chip">read-only FS, tmpfs /tmp</span><span class="chip">cap_drop ALL</span><span class="chip">no-new-privileges</span><span class="chip">pids + memory limits</span><span class="chip">API: no egress, DB via host socket</span><span class="chip">non-root, no shell</span><span class="chip">concurrency + keep-alive limits</span></td></tr>
+  <tr><td>Containers<span>compose, Dockerfile</span></td><td><span class="chip">read-only FS, tmpfs /tmp</span><span class="chip">cap_drop ALL</span><span class="chip">no-new-privileges</span><span class="chip">pids + memory limits</span><span class="chip">API: no egress, DB via host socket</span><span class="chip">writes only the staging dir (own filesystem); object store read-only</span><span class="chip">Caddy header/body read timeouts</span><span class="chip">non-root, no shell</span><span class="chip">concurrency + keep-alive limits</span></td></tr>
   <tr><td>Edge<span>Caddyfile</span></td><td><span class="chip">TLS 1.2/1.3 + HSTS</span><span class="chip">1 MB body cap</span><span class="chip">CSP default-src 'none'</span><span class="chip">no-store</span><span class="chip">X-Forwarded-For replaced with real client</span></td></tr>
   <tr><td>Startup checks<span>config.py</span></td><td><span class="chip">JWT secret ≥ 32 chars</span><span class="chip">bare host only</span><span class="chip">remote DB requires TLS</span><span class="chip">/docs only in dev mode</span></td></tr>
   <tr><td>Transport<span>security.py</span></td><td><span class="chip">64 KB body limit, declared + streamed</span><span class="chip">security headers on every response</span><span class="chip">Server header stripped</span></td></tr>
@@ -402,7 +406,7 @@ $dev bootstrap-moderator ~/.ssh/mod.pub "Mod" mod@example.org
 $dev pending; $dev approve|reject REQUEST_ID ~/.ssh/mod
 $dev revoke user TARGET_ID ~/.ssh/analyst "reason"; $dev approve-revocation ID ~/.ssh/mod
 $dev flag binary TARGET_ID ~/.ssh/viewer "note"; $dev respond-flag FLAG_ID ~/.ssh/analyst "note"</pre>
-<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 372 pytest + <code>cargo test</code>.</p>
+<p class="small muted" style="margin:0">Formats and client commands: <code>docs/authentication.md</code> · endpoints: <code>database/api/README.md</code> · tests: 390 pytest + <code>cargo test</code>.</p>
 
 </body>
 </html>

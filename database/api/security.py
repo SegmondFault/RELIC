@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict, deque
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 from fastapi import HTTPException, Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -27,16 +27,30 @@ class _BodyTooLarge(Exception):
 
 
 class BodySizeLimitMiddleware:
-    """Reject request bodies above ``max_bytes``, declared or streamed."""
+    """Reject request bodies above the limit for their route, declared or streamed.
 
-    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+    ``larger`` maps a path prefix to its own limit (the first match wins);
+    every other route gets ``max_bytes``.
+    """
+
+    def __init__(
+        self, app: ASGIApp, max_bytes: int, larger: Sequence[tuple[str, int]] = ()
+    ) -> None:
         self.app = app
-        self.max_bytes = max_bytes
+        self.default_max_bytes = max_bytes
+        self.larger = tuple(larger)
+
+    def _limit(self, path: str) -> int:
+        for prefix, limit in self.larger:
+            if path == prefix or path.startswith(prefix.rstrip("/") + "/"):
+                return limit
+        return self.default_max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        max_bytes = self._limit(scope["path"])
 
         for name, value in scope.get("headers", []):
             if name == b"content-length":
@@ -45,7 +59,7 @@ class BodySizeLimitMiddleware:
                 except ValueError:
                     await self._reject(send, 400, b'{"detail":"Invalid Content-Length"}')
                     return
-                if declared > self.max_bytes:
+                if declared > max_bytes:
                     await self._reject(send, 413, _JSON_413)
                     return
 
@@ -58,7 +72,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     exceeded = True
                     raise _BodyTooLarge
             return message
@@ -166,6 +180,61 @@ class RateLimiter:
 
     def reset(self) -> None:
         self._hits.clear()
+
+
+class UploadSlots:
+    """Uploads in progress, per key (Analyst) and in total. Per process, like
+    the rate limiter."""
+
+    def __init__(self) -> None:
+        self._active: dict[str, int] = {}
+        self._total = 0
+
+    def acquire(self, key: str, per_key: int, total: int) -> bool:
+        if self._total >= total or self._active.get(key, 0) >= per_key:
+            return False
+        self._active[key] = self._active.get(key, 0) + 1
+        self._total += 1
+        return True
+
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def release(self, key: str) -> None:
+        count = self._active.get(key, 0) - 1
+        if count > 0:
+            self._active[key] = count
+        else:
+            self._active.pop(key, None)
+        self._total = max(self._total - 1, 0)
+
+
+class ByteBudget:
+    """Bytes recorded per key in a sliding window. Per process."""
+
+    def __init__(self, max_keys: int = 100_000) -> None:
+        self._used: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()
+        self._max_keys = max_keys
+
+    def _entries(self, key: str, window_seconds: float) -> deque[tuple[float, int]]:
+        entries = self._used.setdefault(key, deque())
+        self._used.move_to_end(key)
+        while len(self._used) > self._max_keys:
+            self._used.popitem(last=False)
+        cutoff = time.monotonic() - window_seconds
+        while entries and entries[0][0] <= cutoff:
+            entries.popleft()
+        return entries
+
+    def used(self, key: str, window_seconds: float) -> int:
+        return sum(size for _, size in self._entries(key, window_seconds))
+
+    def record(self, key: str, size: int, window_seconds: float) -> None:
+        self._entries(key, window_seconds).append((time.monotonic(), size))
+
+    def reset(self) -> None:
+        self._used.clear()
 
 
 def client_address(request: Request) -> str:

@@ -1,5 +1,14 @@
 {
 	default_sni {$RELIC_HOST}
+	# A client must send its headers within 10s and its whole body within
+	# RELIC_READ_BODY_TIMEOUT (a 64 MB upload in 5 minutes needs ~220 KB/s),
+	# so slow clients cannot hold the API's connections open.
+	servers {
+		timeouts {
+			read_header 10s
+			read_body {$RELIC_READ_BODY_TIMEOUT:5m}
+		}
+	}
 	cert_issuer acme {$ACME_CA} {
 		profile {$ACME_PROFILE}
 	}
@@ -17,7 +26,18 @@
 		-Server
 		-Via
 	}
-	request_body {
+	# FIDBF uploads, then submissions (FIDBF manifests, BSim, provenance),
+	# then everything else. The API enforces the same limits.
+	@object_upload path /v1/fidbf-objects/*
+	request_body @object_upload {
+		max_size 64MB
+	}
+	@submission path /v1/fidbf /v1/bsim /v1/provenance
+	request_body @submission {
+		max_size 4MB
+	}
+	@other not path /v1/fidbf-objects/* /v1/fidbf /v1/bsim /v1/provenance
+	request_body @other {
 		max_size 1MB
 	}
 	header {

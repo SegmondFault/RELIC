@@ -92,8 +92,7 @@ overall. Exceeding them returns `429` with `Retry-After`.
 ### Catalogue (read)
 
 All `GET`, all *Any* role: a valid bearer token is required. All routes below
-are implemented except `/v1/fidbf/{id}/download` (`501` until object storage is
-designed).
+are implemented.
 
 **Conventions**
 
@@ -122,10 +121,10 @@ designed).
 | `/v1/binaries`, `/v1/binaries/{id}` | `batch_id`, `source_id`, `sha256`, `md5` | Binary metadata and SHA-256/MD5. Binary bytes are never stored. |
 | `/v1/functions`, `/v1/functions/{id}` | `binary_id`, `fidbf_id` | Functions within a binary, with FID full/specific hashes. |
 | `/v1/fidbf`, `/v1/fidbf/{id}` | `binary_id`, `source_id`, `sha256` | FIDBF object metadata: hashes, submitter, signature. |
-| `/v1/fidbf/{id}/download` | — | The FIDBF object itself (`501`). |
-| `/v1/bsim`, `/v1/bsim/{id}` | `source_id`, `sha256` | BSim similarity objects; `object_data` on `/{id}` only. |
+| `/v1/fidbf/{id}/download` | — | The FIDBF object's exact bytes, with `X-Content-SHA256` and `X-Content-MD5` to check them. `404` for one admitted before the object store existed; `410` once revoked (Moderators can still download it); `429` past 120 downloads per account per hour. |
+| `/v1/bsim`, `/v1/bsim/{id}` | `source_id`, `sha256` | BSim similarity objects; `object_data` and the signed `object_json` on `/{id}` only. |
 | `/v1/function-bsim` | `function_id`, `binary_id`, `bsim_id` | Which functions each BSim object describes. |
-| `/v1/provenance`, `/v1/provenance/{id}` | `source_id`, `fidbf_id`, `bsim_id`, `binary_id` | OCSF-style provenance seals; `object_data` on `/{id}` only. |
+| `/v1/provenance`, `/v1/provenance/{id}` | `source_id`, `fidbf_id`, `bsim_id`, `binary_id` | OCSF-style provenance seals; `object_data` and the signed `object_json` on `/{id}` only. |
 | `/v1/license-assertions`, `/v1/license-assertions/{id}` | `source_id`, `binary_id` | Signed SPDX licence claims on one source or one binary, with `target_type` and `target_id` as signed. |
 | `/v1/classifications`, `/v1/classifications/{id}` | `target_type`, `target_id` | Signed labels on binaries, functions or behavioural compositions; `evidence` and the signed `evidence_json` on `/{id}` only. |
 | `/v1/software-components`, `/v1/software-components/{id}` | `purl` | Signed software identities (library, application, runtime...). Not a claim about any binary. |
@@ -141,26 +140,34 @@ designed).
 
 ### Corpus submissions
 
-Each returns `201 Created`. Each is atomic: the object, its related rows and
-(for sources, batches, FIDBF, BSim and provenance) its integrity-chain entry
+Every submission route is implemented. Each is atomic: the object, its
+related rows and (for FIDBF, BSim and provenance) its integrity-chain entry
 commit together or not at all. An identical retry returns the original result
-(`200`); the same ID with different content is a conflict (`409`).
+(`200`); the same ID with different content is a conflict (`409`). Signed
+formats: [`docs/authentication.md`](../../docs/authentication.md#licence-assertion).
 
-Licence assertions, classifications, software components and releases,
-binary-component assertions and behavioural compositions are implemented.
-Signed formats: [`docs/authentication.md`](../../docs/authentication.md#licence-assertion);
-`relic-sign-challenge assert-license`, `classify`, `create-component`,
-`create-release`, `assert-component` and `compose` produce the bodies. The
-other submission routes return `501` until integrity-key custody and object
-storage are decided.
+Claims (licence assertions, classifications, components, releases,
+component assertions, compositions) are verified and stored by the API
+(`201`); `relic-sign-challenge assert-license`, `classify`,
+`create-component`, `create-release`, `assert-component` and `compose`
+produce the bodies.
+
+FIDBF, BSim and provenance each take an integrity-chain entry, which only
+the host's `relic-admit` worker can sign (the API never holds the integrity
+key). The API checks them and **stages** them (`202`, with a `status_url`);
+`relic-admit` verifies the signatures and admits or rejects them
+([`docs/workers.md`](../../docs/workers.md#admission-through-the-api-relic-admit)).
+Sources and batches are admitted only as part of a FIDBF manifest. Bodies:
+`relic-sign-fidbf --canonical-storage-path`, `relic-sign-challenge sign-bsim`
+and `sign-provenance`.
 
 | Method | Path | Role | Description |
 |---|---|---|---|
-| `POST` | `/v1/sources` | Analyst · Signed | Register a source. |
-| `POST` | `/v1/batches` | Analyst · Signed | Submit a batch of binary and function records. |
-| `POST` | `/v1/fidbf` | Analyst · Signed | Admit a FIDBF object together with its source, batch, binary, functions and integrity entry. Reference implementation: `crates/relic-ingest`. |
-| `POST` | `/v1/bsim` | Analyst · Signed | Admit a BSim object and its function links. |
-| `POST` | `/v1/provenance` | Analyst · Signed | Submit a provenance seal (a JSON object). The server re-checks its hashes and keeps `unmapped.relic` intact. |
+| `PUT` | `/v1/fidbf-objects/{sha256}` | Analyst | The FIDBF object's raw bytes (with `Content-Length`), before its manifest. Streamed to staging while hashed; the body must match `{sha256}`. At most 64 MiB, two uploads at a time per Analyst (eight overall) and 1 GiB per Analyst per 24 h. `201` staged; `200` already staged; `411` no length; `413` too large; `422` digest mismatch or empty; `429` too many uploads or budget used up; `503` too many uploads overall; `507` staging full. |
+| `POST` | `/v1/fidbf` | Analyst · Signed | The signed manifest from `relic-sign-fidbf`: source, batch, binary, functions and FIDBF, admitted together with one integrity entry. `fidbf.storage_path` must be `<first two hex digits>/<sha256>.fidbf`. `202` staged (the submission ID is `fidbf_id`); `200` identical retry; `403` not the caller; `409` ID reused; `422` invalid or object not uploaded. At most 4 MiB. |
+| `POST` | `/v1/bsim` | Analyst · Signed | `{bsim_id, analyst_id, source_id, object_json, functions: [{function_id, binary_id}], signature}`: a BSim object (JSON object as a string, signed and stored verbatim; its SHA-256 and MD5 are of that text) and the 1 to 10,000 functions it describes. Same status codes as `/v1/fidbf`. |
+| `POST` | `/v1/provenance` | Analyst · Signed | `{provenance_id, analyst_id, source_id, fidbf_id?, bsim_id?, binary_id?, schema_name?, schema_version?, object_json, signature}`: a provenance seal for at least one of FIDBF, BSim or binary, stored verbatim (so `unmapped.relic` stays intact). Same status codes. |
+| `GET` | `/v1/submissions`, `/v1/submissions/{id}` | Analyst (own) · Moderator (any, by ID) | Staged submissions: `status` (`pending`, `admitted`, `rejected`), `result` (IDs, digests, integrity entry) or `error`. Filter `status`; page with `after`. Others' submissions are `404`. |
 | `POST` | `/v1/license-assertions` | Analyst · Signed | `{license_assertion_id, analyst_id, target_type (source\|binary), target_id, spdx_expression, basis, confidence?, evidence_provenance_id?, signature}`: claim an SPDX licence. `confidence` has exactly four decimals. Immutable: corrections are a new assertion plus a revocation. `403` bad signature; `409` ID reused or target revoked; `422` invalid expression, unknown target or evidence. |
 | `POST` | `/v1/classifications` | Analyst · Signed | `{classification_id, analyst_id, target_type (binary\|function\|behavioural_composition), target_id, label, confidence?, misp_universe?, misp_uuid?, evidence_json?, signature}`: label one object. `evidence_json` is a JSON object as a string, signed and stored verbatim (the parsed `evidence` is stored too). Immutable. Same status codes. |
 | `POST` | `/v1/software-components` | Analyst · Signed | `{component_id, analyst_id, name, component_kind, namespace?, purl?, signature}`: name a component. `purl` must be a package URL (`pkg:type/...`). Immutable. `403` bad signature; `409` ID reused. |

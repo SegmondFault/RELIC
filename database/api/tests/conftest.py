@@ -247,9 +247,29 @@ def database() -> Database:
 
 
 @pytest.fixture
-def client(database: Database):
-    with TestClient(create_app(make_settings(database.app_url))) as test_client:
+def client(database: Database, object_dirs: "ObjectDirs"):
+    settings = make_settings(
+        database.app_url, staging_dir=object_dirs.staging, fidbf_root=object_dirs.store
+    )
+    with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+@dataclass
+class ObjectDirs:
+    """The API's staging directory and the FIDBF object store, for this session."""
+
+    staging: Path
+    store: Path
+
+
+@pytest.fixture(scope="session")
+def object_dirs(tmp_path_factory) -> ObjectDirs:
+    root = tmp_path_factory.mktemp("objects")
+    dirs = ObjectDirs(staging=root / "staging", store=root / "store")
+    dirs.staging.mkdir()
+    dirs.store.mkdir()
+    return dirs
 
 
 @pytest.fixture

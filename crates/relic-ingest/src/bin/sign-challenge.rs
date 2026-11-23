@@ -7,8 +7,9 @@
 //! `GET /v1/flags/{id}`; `request-revocation`, `flag`, `assert-license`,
 //! `classify`, `create-component`, `create-release` and `assert-component`
 //! take their fields as arguments, and `compose` reads its members from a JSON
-//! file. Each signs the canonical message with the user's OpenSSH Ed25519 key
-//! and prints the JSON body to POST.
+//! file; `sign-bsim` and `sign-provenance` read the object (and `BSim` function
+//! links) from files. Each signs the canonical message with the user's OpenSSH
+//! Ed25519 key and prints the JSON body to POST.
 
 use std::{
     fs,
@@ -21,6 +22,10 @@ use relic_crypto::{
     SystemSigner,
     auth::{self, AuthChallenge, Decision, Flag, RegistrationDetails, RevocationRequest},
     read_secret_file, verify_digest_signature,
+};
+use relic_ingest::{
+    SignatureHex,
+    objects::{BsimSubmission, FunctionLink, ProvenanceSubmission, object_digests},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -140,6 +145,10 @@ enum Command {
     AssertComponent(ComponentAssertionArgs),
     /// Sign an Analyst's behavioural composition, all members included.
     Compose(ComposeArgs),
+    /// Sign an Analyst's `BSim` object and the functions it describes.
+    SignBsim(BsimArgs),
+    /// Sign an Analyst's provenance seal.
+    SignProvenance(ProvenanceArgs),
     /// Sign an Analyst's response to a flag.
     RespondFlag {
         /// Flag JSON returned by `GET /v1/flags/{id}`.
@@ -319,6 +328,54 @@ struct ComposeArgs {
     /// Composition ID; a fresh random UUID if omitted. Reuse it to retry.
     #[arg(long)]
     behavioural_composition_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct BsimArgs {
+    /// The submitting Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    source_id: Uuid,
+    /// JSON object file; its exact bytes are signed and stored.
+    #[arg(long)]
+    object: PathBuf,
+    /// JSON array of `{"function_id": ..., "binary_id": ...}`.
+    #[arg(long)]
+    functions: PathBuf,
+    /// `BSim` ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    bsim_id: Option<Uuid>,
+    #[command(flatten)]
+    key: KeyArgs,
+}
+
+#[derive(Debug, Args)]
+struct ProvenanceArgs {
+    /// The submitting Analyst's own User ID.
+    #[arg(long)]
+    analyst_id: Uuid,
+    #[arg(long)]
+    source_id: Uuid,
+    #[arg(long)]
+    fidbf_id: Option<Uuid>,
+    #[arg(long)]
+    bsim_id: Option<Uuid>,
+    #[arg(long)]
+    binary_id: Option<Uuid>,
+    /// e.g. ocsf.
+    #[arg(long)]
+    schema_name: Option<String>,
+    #[arg(long)]
+    schema_version: Option<String>,
+    /// JSON object file; its exact bytes are signed and stored.
+    #[arg(long)]
+    object: PathBuf,
+    /// Provenance ID; a fresh random UUID if omitted. Reuse it to retry.
+    #[arg(long)]
+    provenance_id: Option<Uuid>,
     #[command(flatten)]
     key: KeyArgs,
 }
@@ -550,6 +607,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::CreateRelease(args) => create_release(&args)?,
         Command::AssertComponent(args) => assert_component(&args)?,
         Command::Compose(args) => compose(&args)?,
+        Command::SignBsim(args) => sign_bsim(&args)?,
+        Command::SignProvenance(args) => sign_provenance(&args)?,
         Command::RespondFlag {
             flag,
             analyst_id,
@@ -1081,6 +1140,60 @@ fn compose(args: &ComposeArgs) -> Result<serde_json::Value, Box<dyn std::error::
         "members": entries,
         "signature": hex(&signature),
     }))
+}
+
+/// An object file as UTF-8 text, which must hold a JSON object.
+fn object_text(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let text = String::from_utf8(fs::read(path)?)?;
+    if !serde_json::from_str::<serde_json::Value>(&text)?.is_object() {
+        return Err(format!("{} must hold a JSON object", path.display()).into());
+    }
+    Ok(text)
+}
+
+/// Body for `POST /v1/bsim`.
+fn sign_bsim(args: &BsimArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let functions: Vec<FunctionLink> = serde_json::from_slice(&fs::read(&args.functions)?)?;
+    let submission = BsimSubmission {
+        bsim_id: args.bsim_id.unwrap_or_else(Uuid::new_v4),
+        analyst_id: args.analyst_id,
+        source_id: args.source_id,
+        object_json: object_text(&args.object)?,
+        functions,
+        signature: SignatureHex::from_bytes([0; 64]),
+    };
+    let (sha256, _) = object_digests(&submission.object_json);
+    eprintln!(
+        "Signing: BSim object {} (SHA-256 {sha256}) from source {} describing {} function(s)",
+        submission.bsim_id,
+        submission.source_id,
+        submission.functions.len()
+    );
+    let signer = load_key(&args.key)?;
+    Ok(serde_json::to_value(submission.signed(&signer))?)
+}
+
+/// Body for `POST /v1/provenance`.
+fn sign_provenance(args: &ProvenanceArgs) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let submission = ProvenanceSubmission {
+        provenance_id: args.provenance_id.unwrap_or_else(Uuid::new_v4),
+        analyst_id: args.analyst_id,
+        source_id: args.source_id,
+        fidbf_id: args.fidbf_id,
+        bsim_id: args.bsim_id,
+        binary_id: args.binary_id,
+        schema_name: args.schema_name.clone(),
+        schema_version: args.schema_version.clone(),
+        object_json: object_text(&args.object)?,
+        signature: SignatureHex::from_bytes([0; 64]),
+    };
+    let (sha256, _) = object_digests(&submission.object_json);
+    eprintln!(
+        "Signing: provenance {} (SHA-256 {sha256}) for FIDBF {:?}, BSim {:?}, binary {:?}",
+        submission.provenance_id, submission.fidbf_id, submission.bsim_id, submission.binary_id
+    );
+    let signer = load_key(&args.key)?;
+    Ok(serde_json::to_value(submission.signed(&signer))?)
 }
 
 fn parse_decision(decision: &str) -> Decision {

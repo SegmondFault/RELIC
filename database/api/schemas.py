@@ -325,6 +325,7 @@ class Bsim(BaseModel):
 
 class BsimDetail(Bsim):
     object_data: Any
+    object_json: str = Field(description="The object exactly as signed")
 
 
 class FunctionBsim(BaseModel):
@@ -354,6 +355,7 @@ class Provenance(BaseModel):
 
 class ProvenanceDetail(Provenance):
     object_data: dict[str, Any] | None
+    object_json: str | None = Field(description="The seal exactly as signed (absent for legacy paths)")
 
 
 class LicenseAssertion(BaseModel):
@@ -727,3 +729,111 @@ class BehaviouralCompositionDetail(BehaviouralComposition):
     members: list[CompositionMember] = Field(
         description="Ordered by sequence number (unordered members last), then target"
     )
+
+
+# ---------------------------------------------------------------------------
+# Staged submissions: FIDBF, BSim, provenance
+# ---------------------------------------------------------------------------
+
+MAX_OBJECT_JSON_BYTES = 2 * 1024 * 1024
+MAX_BSIM_FUNCTIONS = 10_000
+SubmissionKind = Literal["fidbf", "bsim", "provenance"]
+SubmissionState = Literal["pending", "admitted", "rejected"]
+
+def _object_bytes(value: str) -> str:
+    if len(value.encode("utf-8")) > MAX_OBJECT_JSON_BYTES:
+        raise ValueError(f"larger than {MAX_OBJECT_JSON_BYTES} bytes")
+    return value
+
+
+ObjectJson = Annotated[
+    str,
+    Field(min_length=2, max_length=MAX_OBJECT_JSON_BYTES,
+          description="A JSON object, signed and stored as this exact text"),
+    AfterValidator(_object_bytes),
+    AfterValidator(_evidence),
+]
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+Md5Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+
+
+class StagedObject(BaseModel):
+    sha256: str
+    md5: str
+    size_bytes: int
+
+
+class SubmissionStatus(BaseModel):
+    submission_id: UUID = Field(description="The ID of the object it creates")
+    kind: SubmissionKind
+    status: SubmissionState
+    received_at: datetime
+    decided_at: datetime | None
+    attempts: int
+    result: dict[str, Any] | None = Field(description="IDs and digests, once admitted")
+    error: str | None = Field(description="Why it was rejected")
+    status_url: str
+
+
+class _FidbfPart(BaseModel):
+    fidbf_id: UUID
+    storage_path: str
+    sha256: Sha256Hex
+    md5: Md5Hex
+
+
+class _SourcePart(BaseModel):
+    source_type: str
+
+
+class FidbfManifest(BaseModel):
+    """The parts of a signed FIDBF manifest (from relic-sign-fidbf) the API checks.
+
+    relic-admit parses and verifies the whole manifest, signatures included.
+    """
+
+    model_config = ConfigDict(extra="allow")
+    analyst_user_id: UUID
+    source: _SourcePart
+    fidbf: _FidbfPart
+    analyst_signatures: dict[str, HexSignature]
+
+
+class FunctionLinkIn(_Request):
+    function_id: UUID
+    binary_id: UUID
+
+
+class BsimSubmissionIn(_Request):
+    bsim_id: UUID = Field(description="Chosen by the Analyst; also the submission ID")
+    analyst_id: UUID = Field(description="The submitting Analyst: must be the caller")
+    source_id: UUID
+    object_json: ObjectJson
+    functions: list[FunctionLinkIn] = Field(min_length=1, max_length=MAX_BSIM_FUNCTIONS)
+    signature: HexSignature
+
+    @model_validator(mode="after")
+    def _distinct_links(self) -> "BsimSubmissionIn":
+        links = [(f.function_id, f.binary_id) for f in self.functions]
+        if len(links) != len(set(links)):
+            raise ValueError("function links must be distinct")
+        return self
+
+
+class ProvenanceSubmissionIn(_Request):
+    provenance_id: UUID = Field(description="Chosen by the Analyst; also the submission ID")
+    analyst_id: UUID = Field(description="The submitting Analyst: must be the caller")
+    source_id: UUID
+    fidbf_id: UUID | None = None
+    bsim_id: UUID | None = None
+    binary_id: UUID | None = None
+    schema_name: DisplayText | None = None
+    schema_version: DisplayText | None = None
+    object_json: ObjectJson
+    signature: HexSignature
+
+    @model_validator(mode="after")
+    def _has_target(self) -> "ProvenanceSubmissionIn":
+        if self.fidbf_id is None and self.bsim_id is None and self.binary_id is None:
+            raise ValueError("name a fidbf_id, bsim_id or binary_id")
+        return self

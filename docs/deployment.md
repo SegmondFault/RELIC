@@ -2,9 +2,12 @@
 
 ```
 internet ──443──▶ Caddy ──internal network──▶ API ──Unix socket──▶ PostgreSQL (host, 127.0.0.1 only)
-                                                                   ▲
-                       relic-ingest-fidbf, relic-checkpoint-mmr,   │ Unix socket, peer auth
-                       relic-chain-bsim, relic-verify (host) ──────┘
+                                               │  ▲                ▲
+                          writes /var/lib/relic/staging            │ Unix socket, peer auth
+                          reads  /srv/relic-objects (read-only)    │
+                                                                   │
+              relic-admit, relic-checkpoint-mmr, relic-verify, ────┘
+              relic-ingest-fidbf, relic-chain-bsim (host)
 ```
 
 - PostgreSQL keeps listening on `127.0.0.1` only. No database port is opened
@@ -16,6 +19,9 @@ internet ──443──▶ Caddy ──internal network──▶ API ──Unix
   by peer authentication: no worker or auditor password exists to be stolen.
 - `pg_hba.conf` refuses every RELIC login over TCP, so a stolen password is
   useless from anywhere but the socket.
+- The API never holds the integrity key. FIDBF, BSim and provenance
+  submissions (each takes an integrity-chain entry) are staged by the API and
+  admitted by `relic-admit` on the host, which verifies every signature.
 
 `scripts/test-infrastructure.sh` builds exactly this layout in a temporary
 directory and checks it end to end (see the end of this page).
@@ -109,7 +115,97 @@ With a dedicated worker user (see section 1), give the directory to that user
 instead of `ns`. The API never reads these keys, and the directory is not
 mounted into any container.
 
-## 5. Check it
+## 5. Object storage and `relic-admit`
+
+The API stages uploaded FIDBF objects in `/var/lib/relic/staging` (its only
+writable mount) and serves admitted ones from `/srv/relic-objects` (mounted
+read-only). `relic-admit` reads the staging directory and writes the store.
+**Give staging a filesystem of its own.** The API caps staging at 4 GiB,
+but a compromised API ignores its own cap; on a separate, fixed-size
+filesystem it can fill only that, never the disk PostgreSQL writes to. A
+loop-mounted image needs no repartitioning:
+
+```bash
+sudo install -d -m 0700 /var/lib/relic
+sudo fallocate -l 5G /var/lib/relic/staging.img          # a little above the 4 GiB cap
+sudo mkfs.ext4 -q -m 0 /var/lib/relic/staging.img
+sudo install -d /var/lib/relic/staging
+echo '/var/lib/relic/staging.img /var/lib/relic/staging ext4 loop,nodev,nosuid,noexec 0 2' \
+    | sudo tee -a /etc/fstab
+sudo mount /var/lib/relic/staging
+findmnt /var/lib/relic/staging      # must show its own ext4 filesystem, not /
+```
+
+The container runs as uid 10001; give it the staging directory with the
+worker's group, so the worker can read and remove what it staged:
+
+```bash
+sudo chown 10001:ns /var/lib/relic/staging && sudo chmod 2770 /var/lib/relic/staging  # setgid: files get group ns
+sudo install -d -o ns -g ns -m 0755 /srv/relic-objects          # the API only reads it
+```
+
+(With a dedicated worker user, use its group and owner instead of `ns`.) If
+either directory lives elsewhere, set `RELIC_STAGING_DIR` and
+`RELIC_FIDBF_ROOT` for `docker compose`; the container always sees them at
+these paths. The backup (`RELIC_FIDBF_ROOT` there too) covers the store; the
+staging area holds only uploads not yet admitted.
+
+`relic-admit` runs as a service. `/etc/relic/admit.env` (mode 0600, owner
+`ns`):
+
+```
+RELIC_DATABASE_URL=host=/var/run/postgresql dbname=relic user=relic_worker
+RELIC_INTEGRITY_SYSTEM_USER_ID=<integrity system account>
+RELIC_INTEGRITY_KEY=/var/lib/relic/keys/integrity_ed25519
+```
+
+`/etc/systemd/system/relic-admit.service`:
+
+```ini
+[Unit]
+Description=RELIC admission of staged FIDBF, BSim and provenance submissions
+After=postgresql.service
+
+[Service]
+User=ns
+EnvironmentFile=/etc/relic/admit.env
+ExecStart=/srv/relic/target/release/relic-admit --poll-seconds 5
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/relic/staging /srv/relic-objects
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`sudo systemctl enable --now relic-admit`. It handles one submission at a
+time, prints one line per outcome (`journalctl -u relic-admit`), retries a
+transient failure up to five times, and removes staged uploads abandoned for
+more than 24 hours. It refuses to start unless its integrity account exists,
+is an active system account and matches its key. A rejected submission's
+reason, shown to the submitter, never includes PostgreSQL's detail (which
+can name other rows); the worker's log keeps it.
+
+Upload and download limits (the API's `.env`; defaults shown):
+
+| Setting | Default | Effect |
+|---|---|---|
+| `RELIC_MAX_OBJECT_BYTES` | 64 MiB | one upload; Caddy enforces the same |
+| `RELIC_MAX_STAGING_BYTES` | 4 GiB | all staged uploads, the incoming one included (`507`) |
+| `RELIC_MAX_UPLOADS_PER_ANALYST` | 2 | uploads in progress per Analyst (`429`) |
+| `RELIC_MAX_UPLOADS_TOTAL` | 8 | uploads in progress overall (`503`) |
+| `RELIC_UPLOAD_BYTES_PER_ANALYST_PER_DAY` | 1 GiB | bytes one Analyst may upload in 24 h (`429`) |
+| `RELIC_DOWNLOAD_RATE_LIMIT_PER_HOUR` | 120 | FIDBF downloads per account (`429`) |
+
+Caddy drops a client that takes more than 10 s to send its headers or more
+than `RELIC_READ_BODY_TIMEOUT` (default 5 minutes, set for `docker compose`)
+to send its body, so slow clients cannot hold the API's connections; raise
+it if Analysts upload large objects over slow links. The in-process limits
+assume one API worker process, like the rate limits.
+
+## 6. Check it
 
 On the server (or any machine with Docker and the PostgreSQL server
 binaries), without touching the production database:
@@ -123,8 +219,12 @@ in a temporary directory), runs the production compose file as project
 `relic-infra-test` with Caddy on `127.0.0.1:18443` and a local CA, and checks:
 loopback-only listening; every RELIC login refused over TCP; peer and
 password logins over the socket; the API container without internet, without
-TCP to PostgreSQL and with a read-only socket mount; TLS and security headers
+TCP to PostgreSQL and with read-only socket and object-store mounts; TLS and security headers
 through Caddy; registration and the two-Moderator flow; FIDBF admission as
-`relic_worker` (and its refusal as `relic_app`); signed claims; an MMR
+`relic_worker` (and its refusal as `relic_app`); signed claims; a FIDBF
+upload, BSim object and provenance seal through Caddy, admitted by
+`relic-admit`, and the FIDBF downloaded back byte for byte; a full staging
+area refusing an upload, a stalled upload dropped by Caddy, and the
+per-account download limit; an MMR
 checkpoint; and `relic-verify` passing, then catching a forged row. Everything
 is removed afterwards (`RELIC_TEST_KEEP=1` keeps it for inspection).

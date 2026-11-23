@@ -14,6 +14,7 @@ use uuid::Uuid;
 const CHAIN_HASH_DOMAIN: &[u8] = b"RELIC:integrity-chain-hash:v1";
 const SIGNATURE_DOMAIN: &[u8] = b"RELIC:integrity-system-signature:v1";
 const BSIM_RECORD_DOMAIN: &[u8] = b"RELIC:bsim-record:v1";
+const PROVENANCE_RECORD_DOMAIN: &[u8] = b"RELIC:provenance-record:v1";
 
 /// Unsigned, canonical fields committed by an integrity-chain entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +79,36 @@ pub fn bsim_record_hash(record: &BsimRecord<'_>) -> Digest32 {
         BSIM_RECORD_DOMAIN,
         &[
             record.bsim_id.as_bytes(),
+            record.source_id.as_bytes(),
+            record.sha256.as_bytes(),
+            record.md5.as_bytes(),
+            &record.created_at_micros.to_be_bytes(),
+            record.submitter.as_bytes(),
+            record.signature,
+        ],
+    )
+}
+
+/// The stored provenance fields an integrity entry commits to.
+#[derive(Clone, Copy, Debug)]
+pub struct ProvenanceRecord<'a> {
+    pub provenance_id: Uuid,
+    pub source_id: Uuid,
+    /// Lowercase hex, exactly as stored.
+    pub sha256: &'a str,
+    pub md5: &'a str,
+    pub created_at_micros: i64,
+    pub submitter: Uuid,
+    pub signature: &'a [u8],
+}
+
+/// The integrity-chain `record_hash` of a provenance seal.
+#[must_use]
+pub fn provenance_record_hash(record: &ProvenanceRecord<'_>) -> Digest32 {
+    hash_fields(
+        PROVENANCE_RECORD_DOMAIN,
+        &[
+            record.provenance_id.as_bytes(),
             record.source_id.as_bytes(),
             record.sha256.as_bytes(),
             record.md5.as_bytes(),

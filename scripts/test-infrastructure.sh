@@ -26,6 +26,11 @@ project="relic-infra-test"
 me="$(id -un)"
 work="$(mktemp -d)"
 sock="$work/socket"
+# The API's staging directory and the FIDBF object store. Production gives
+# the staging directory to the container's user with the worker's group
+# (docs/deployment.md); here the container (uid 10001) only needs to write.
+staging="$work/staging"
+store="$work/objects"
 data="$work/data"
 target="$repo/target/debug"
 api="https://localhost:${https_port}/v1"
@@ -34,7 +39,8 @@ pass=0
 fail=0
 
 compose() {
-    RELIC_HOST=localhost RELIC_PG_SOCKET_DIR="$sock" docker compose -p "$project" \
+    RELIC_HOST=localhost RELIC_PG_SOCKET_DIR="$sock" RELIC_STAGING_DIR="$staging" \
+        RELIC_FIDBF_ROOT="$store" docker compose -p "$project" \
         --env-file "$work/compose.env" \
         -f "$repo/database/api/docker-compose.yml" -f "$work/override.yml" "$@"
 }
@@ -136,6 +142,8 @@ assert n == 1, "Caddyfile ACME block not found"
 open(sys.argv[2], "w").write(text)
 PY
 : > "$work/compose.env"
+mkdir -p "$staging" "$store"
+chmod 2777 "$staging"
 cat > "$work/override.yml" <<EOF
 services:
   api:
@@ -148,7 +156,12 @@ services:
       # a scripted run that logs in a dozen times from one address.
       RELIC_AUTH_RATE_LIMIT_PER_MINUTE: "120"
       RELIC_REGISTRATION_RATE_LIMIT_PER_HOUR: "100"
+      # Small enough to reach in a test: 3 MiB of staging, 3 downloads/h.
+      RELIC_MAX_STAGING_BYTES: "3145728"
+      RELIC_DOWNLOAD_RATE_LIMIT_PER_HOUR: "3"
   caddy:
+    environment:
+      RELIC_READ_BODY_TIMEOUT: 5s
     ports: !override
       - "127.0.0.1:${https_port}:443"
     volumes: !override
@@ -188,6 +201,9 @@ try: socket.create_connection(('${gateway:-172.17.0.1}', ${pg_port}), timeout=3)
 except OSError: print('blocked')")"
 check "API container: socket directory is read-only" read-only "$(container_probe "
 try: open('/var/run/postgresql/x', 'w'); print('writable')
+except OSError: print('read-only')")"
+check "API container: object store is read-only" read-only "$(container_probe "
+try: open('/srv/relic-objects/x', 'w'); print('writable')
 except OSError: print('read-only')")"
 
 # ---------------------------------------------------------------------------
@@ -324,11 +340,97 @@ viewer_token="$(login "$work/viewer")"
 check "a Viewer cannot assert a licence" 403 "$(post license-assertions "$work/license.json" "$viewer_token")"
 
 # ---------------------------------------------------------------------------
+step "FIDBF, BSim and provenance through Caddy, admitted on the host by relic-admit"
+head -c 2097152 /dev/urandom > "$work/object2.fidbf"   # 2 MiB: above the 1 MB general limit
+python3 - "$work/manifest.json" "$work/manifest-api.json" "$work/object2.fidbf" <<'PY3'
+import hashlib, json, sys, uuid
+m = json.load(open(sys.argv[1]))
+data = open(sys.argv[3], "rb").read()
+for part, key in (("source", "source_id"), ("batch", "batch_id"), ("binary", "binary_id"), ("fidbf", "fidbf_id")):
+    m[part][key] = str(uuid.uuid4())
+for function in m["functions"]:
+    function["function_id"] = str(uuid.uuid4())
+m["fidbf"].update(sha256=hashlib.sha256(data).hexdigest(), md5=hashlib.md5(data).hexdigest())
+json.dump(m, open(sys.argv[2], "w"))
+PY3
+"$target/relic-sign-fidbf" --manifest "$work/manifest-api.json" --fidbf-object "$work/object2.fidbf" \
+    --analyst-key "$work/analyst" --output "$work/signed-api.json" --canonical-storage-path 2>/dev/null
+object_sha="$(sha256sum "$work/object2.fidbf" | cut -d' ' -f1)"
+api_fidbf="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fidbf"]["fidbf_id"])' "$work/signed-api.json")"
+api_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["source_id"])' "$work/signed-api.json")"
+api_function="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["functions"][0]["function_id"])' "$work/signed-api.json")"
+api_binary="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binary"]["binary_id"])' "$work/signed-api.json")"
+check "FIDBF object (2 MiB) uploaded through Caddy" 201 \
+    "$(curl_api -o /dev/null -w '%{http_code}' -X PUT "$api/fidbf-objects/$object_sha" \
+        -H "authorization: Bearer $analyst_token" --data-binary @"$work/object2.fidbf")"
+check "a 2 MiB body is refused on an ordinary route" 413 \
+    "$(curl_api -o /dev/null -w '%{http_code}' -X POST "$api/license-assertions" \
+        -H "authorization: Bearer $analyst_token" -H 'content-type: application/json' \
+        --data-binary @"$work/object2.fidbf")"
+head -c 2097152 /dev/urandom > "$work/object3.fidbf"
+check "staging full: a second 2 MiB upload is refused (507)" 507 \
+    "$(curl_api -o /dev/null -w '%{http_code}' -X PUT \
+        "$api/fidbf-objects/$(sha256sum "$work/object3.fidbf" | cut -d' ' -f1)" \
+        -H "authorization: Bearer $analyst_token" --data-binary @"$work/object3.fidbf")"
+slow_upload() { # prints how many seconds Caddy took to drop a stalled upload
+    python3 - "$work/root.crt" "$https_port" "$analyst_token" <<'PY'
+import socket, ssl, sys, time
+context = ssl.create_default_context(cafile=sys.argv[1])
+raw = socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=30)
+conn = context.wrap_socket(raw, server_hostname="localhost")
+conn.sendall((f"PUT /v1/fidbf-objects/{'a' * 64} HTTP/1.1\r\nHost: localhost\r\n"
+              f"Authorization: Bearer {sys.argv[3]}\r\nContent-Length: 1000000\r\n\r\n").encode()
+             + b"x" * 100)
+start = time.monotonic()
+try:
+    while conn.recv(4096):
+        pass
+except OSError:
+    pass
+print(round(time.monotonic() - start))
+PY
+}
+waited="$(slow_upload)"
+check "a stalled upload is dropped by Caddy's body timeout" yes \
+    "$( [[ "$waited" -ge 3 && "$waited" -le 15 ]] && echo yes || echo "no (${waited}s)")"
+check "FIDBF manifest staged (202)" 202 "$(post fidbf "$work/signed-api.json" "$analyst_token")"
+printf '{"features": [0.25, 0.5], "tool": "bsim"}' > "$work/bsim.json"
+printf '[{"function_id": "%s", "binary_id": "%s"}]' "$api_function" "$api_binary" > "$work/links.json"
+printf '{"class_uid": 5020, "unmapped": {"relic": {"recipe": "make"}}}' > "$work/seal.json"
+admit() {
+    "$target/relic-admit" --database-url "$worker_url" --once \
+        --integrity-system-user-id "$(system_id integrity)" --integrity-key "$work/integrity" \
+        --staging-dir "$staging" --fidbf-root "$store" >> "$work/admit.log" 2>&1
+}
+admit
+check "relic-admit admits the FIDBF as relic_worker" 0 "$?"
+submission() { curl_api "$api/submissions/$1" -H "authorization: Bearer $analyst_token" | field status; }
+check "FIDBF submission admitted" admitted "$(submission "$api_fidbf")"
+check "FIDBF downloads through Caddy, byte for byte" "$object_sha" \
+    "$(curl_api "$api/fidbf/$api_fidbf/download" -H "authorization: Bearer $analyst_token" | sha256sum | cut -d' ' -f1)"
+check "staged upload removed after admission" 0 "$(find "$staging" -type f | wc -l)"
+download() { curl_api -o /dev/null -w '%{http_code}' "$api/fidbf/$api_fidbf/download" -H "authorization: Bearer $1"; }
+check "downloads are limited per account (3/h here)" "200 200 429" \
+    "$(download "$analyst_token") $(download "$analyst_token") $(download "$analyst_token")"
+check "the limit is the account's, not the address's" 200 "$(download "$viewer_token")"
+"$sign" sign-bsim --analyst-id "$analyst_id" --source-id "$api_source" --object "$work/bsim.json" \
+    --functions "$work/links.json" --key "$work/analyst" > "$work/bsim-body.json" 2>/dev/null
+check "BSim object staged (202)" 202 "$(post bsim "$work/bsim-body.json" "$analyst_token")"
+bsim_id="$(field bsim_id < "$work/bsim-body.json")"
+"$sign" sign-provenance --analyst-id "$analyst_id" --source-id "$api_source" --bsim-id "$bsim_id" \
+    --schema-name ocsf --object "$work/seal.json" --key "$work/analyst" > "$work/seal-body.json" 2>/dev/null
+check "provenance seal staged (202)" 202 "$(post provenance "$work/seal-body.json" "$analyst_token")"
+admit
+check "BSim object admitted" admitted "$(submission "$bsim_id")"
+check "provenance seal admitted" admitted "$(submission "$(field provenance_id < "$work/seal-body.json")")"
+
+# ---------------------------------------------------------------------------
 step "MMR checkpoint on the host as relic_worker"
 "$target/relic-checkpoint-mmr" --database-url "$worker_url" --system-user-id "$(system_id mmr)" \
     --key "$work/mmr" > "$work/mmr.json" 2>"$work/mmr.err"
 check "relic-checkpoint-mmr signs a checkpoint" True "$(field inserted < "$work/mmr.json" 2>/dev/null)"
-check "latest checkpoint readable through Caddy" 1 \
+check "latest checkpoint covers the whole chain, read through Caddy" \
+    "$(owner_sql -c "SELECT count(*) FROM catalogue.integrity" | tail -1)" \
     "$(curl_api "$api/mmr-checkpoints/latest" -H "authorization: Bearer $analyst_token" | field leaf_count)"
 
 # ---------------------------------------------------------------------------

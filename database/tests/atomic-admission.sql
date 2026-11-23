@@ -31,10 +31,10 @@ BEGIN
         );
 
         INSERT INTO bsim (
-            bsim_id, object_data, sha256, md5, submitted_by_user_id,
+            bsim_id, object_data, object_json, sha256, md5, submitted_by_user_id,
             signature, source_id
         ) VALUES (
-            bsim_id_value, '{"value":1}', repeat('a', 64), repeat('b', 32),
+            bsim_id_value, '{"value":1}', '{"value":1}', encode(sha256(convert_to('{"value":1}', 'UTF8')), 'hex'), md5('{"value":1}'),
             analyst_id, decode(repeat('04', 64), 'hex'), source_id_value
         );
 
@@ -197,10 +197,10 @@ BEGIN
         (second_function_id, binary_id_value, 'full-2', 'specific-2');
 
     INSERT INTO bsim (
-        bsim_id, object_data, sha256, md5, submitted_by_user_id,
+        bsim_id, object_data, object_json, sha256, md5, submitted_by_user_id,
         signature, source_id
     ) VALUES (
-        bsim_id_value, '{"value":2}', repeat('5', 64), repeat('6', 32),
+        bsim_id_value, '{"value":2}', '{"value":2}', encode(sha256(convert_to('{"value":2}', 'UTF8')), 'hex'), md5('{"value":2}'),
         analyst_id, decode(repeat('16', 64), 'hex'), source_id_value
     );
 
@@ -308,12 +308,13 @@ BEGIN
     );
 
     INSERT INTO provenance (
-        provenance_id, binary_id, schema_name, schema_version, object_data,
+        provenance_id, binary_id, schema_name, schema_version, object_data, object_json,
         sha256, md5, submitted_by_user_id, signature, source_id
     ) VALUES (
         provenance_id_value, binary_id_value, 'ocsf', '1.9.0',
         '{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}',
-        repeat('5', 64), repeat('6', 32), analyst_id, decode(repeat('44', 64), 'hex'), source_id_value
+        '{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}',
+        encode(sha256(convert_to('{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}', 'UTF8')), 'hex'), md5('{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}'), analyst_id, decode(repeat('44', 64), 'hex'), source_id_value
     );
 
     INSERT INTO software_component (

@@ -291,6 +291,38 @@ compositions carry `ancestor_revoked`: true when a row they depend on (their
 component, release, source, binary, member or evidence) is revoked, while
 `revoked` still reports only the row itself.
 
+### BSim object
+
+- `D = RELIC:analyst-bsim:v1`, `S = RELIC:analyst-bsim-signature:v1`
+- fields: `bsim_id`, `analyst_id`, `source_id`, the SHA-256 and the MD5 of
+  `object_json` (each as lowercase hex text), then the function links: for
+  each link the 16 `function_id` bytes followed by the 16 `binary_id` bytes,
+  the links **sorted bytewise** and concatenated, so their order does not matter
+- `POST /v1/bsim` with `bsim_id`, `analyst_id`, `source_id`, `object_json`,
+  `functions` (a list of `{function_id, binary_id}`) and `signature`
+
+`object_json` is the BSim object as a JSON object in a string, signed by its
+digests and stored as that exact text; the database requires the stored
+SHA-256 and MD5 to be its digests. 1 to 10,000 distinct links.
+
+### Provenance seal
+
+- `D = RELIC:analyst-provenance:v1`, `S = RELIC:analyst-provenance-signature:v1`
+- fields: `provenance_id`, `analyst_id`, `source_id`, the optional
+  `fidbf_id`, `bsim_id` and `binary_id` (`0x00`, or `0x01` and 16 bytes),
+  the optional `schema_name` and `schema_version`, then the SHA-256 and MD5 of
+  `object_json` (lowercase hex text)
+- `POST /v1/provenance` with those values, `object_json` and `signature`
+
+At least one of `fidbf_id`, `bsim_id` and `binary_id`. The seal is stored
+verbatim like a BSim object, so `unmapped.relic` is kept exactly.
+
+BSim objects, provenance seals and FIDBF manifests take an integrity-chain
+entry, which only `relic-admit` can sign: the API stages them and answers
+`202`; the signatures are verified when `relic-admit` admits them, and a
+submission that fails is marked `rejected` with the reason
+(`GET /v1/submissions/{id}`).
+
 ## Client
 
 Generate a key used only for RELIC, and build the signer:
@@ -453,3 +485,30 @@ target/release/relic-sign-challenge compose --analyst-id "$ANALYST_ID" \
 POST them, in that order, to `/v1/software-components`,
 `/v1/software-releases`, `/v1/binary-component-assertions` and
 `/v1/behavioural-compositions`, as above.
+
+**FIDBF, BSim and provenance** (Analyst). Sign the FIDBF manifest with the
+store path the API requires, upload the object, then post the manifest;
+the response's `status_url` shows when `relic-admit` has admitted it:
+
+```bash
+target/release/relic-sign-fidbf --manifest manifest.json --fidbf-object object.fidbf \
+     --analyst-key ~/.ssh/relic_ed25519 --canonical-storage-path --output signed.json
+SHA="$(sha256sum object.fidbf | cut -d' ' -f1)"
+curl -s -X PUT https://$HOST/v1/fidbf-objects/$SHA \
+     -H "authorization: Bearer $TOKEN" --data-binary @object.fidbf
+curl -s -X POST https://$HOST/v1/fidbf \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @signed.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     https://$HOST/v1/submissions/"$(jq -r .fidbf.fidbf_id signed.json)"   # pending, then admitted
+
+target/release/relic-sign-challenge sign-bsim --analyst-id "$ANALYST_ID" \
+     --source-id "$SOURCE_ID" --object bsim.json --functions links.json \
+     --key ~/.ssh/relic_ed25519 > bsim-body.json          # links.json: [{"function_id", "binary_id"}]
+target/release/relic-sign-challenge sign-provenance --analyst-id "$ANALYST_ID" \
+     --source-id "$SOURCE_ID" --bsim-id "$(jq -r .bsim_id bsim-body.json)" \
+     --schema-name ocsf --object seal.json --key ~/.ssh/relic_ed25519 > seal-body.json
+```
+
+POST them to `/v1/bsim` and `/v1/provenance` like the manifest. Download an
+admitted FIDBF with `GET /v1/fidbf/{id}/download` and compare its SHA-256 with
+the `X-Content-SHA256` header.

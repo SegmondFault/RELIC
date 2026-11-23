@@ -19,6 +19,7 @@ NOT_CATALOGUE_DATA = {
 }
 WORKER_INSERTS = {
     "source", "batch", "binary_record", "fidbf", "function_record", "integrity", "mmr_checkpoint",
+    "bsim", "function_bsim", "provenance",
 }
 
 
@@ -48,7 +49,7 @@ API_INSERTS = {
     "auth_challenge", "registration_request", "registration_approval", "revocation",
     "revocation_approval", "flag", "flag_response", "license_assertion", "classification",
     "software_component", "software_release", "binary_component_assertion",
-    "behavioural_composition", "composition_member",
+    "behavioural_composition", "composition_member", "submission",
 }
 
 
@@ -68,6 +69,15 @@ def test_worker_login_privileges(database):
     assert _granted(database, "relic_worker", "INSERT") == WORKER_INSERTS
     assert _granted(database, "relic_worker", "UPDATE") == set()
     assert _granted(database, "relic_worker", "DELETE") == set()
+    # Only a submission's outcome, never what was submitted.
+    columns = {
+        row[0]
+        for row in database.execute(
+            "SELECT attname FROM pg_attribute WHERE attrelid = 'catalogue.submission'::regclass"
+            "   AND attnum > 0 AND has_column_privilege('relic_worker', attrelid, attnum, 'UPDATE')"
+        )
+    }
+    assert columns == {"status", "attempts", "decided_at", "result", "error"}
 
 
 def test_new_tables_are_not_writable_by_the_api(database):

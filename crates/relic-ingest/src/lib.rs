@@ -17,6 +17,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod admission;
+pub mod objects;
+
 const SOURCE_SIGNATURE_DOMAIN: &[u8] = b"RELIC:analyst-source-signature:v1";
 const BATCH_SIGNATURE_DOMAIN: &[u8] = b"RELIC:analyst-batch-signature:v1";
 const FIDBF_SIGNATURE_DOMAIN: &[u8] = b"RELIC:analyst-fidbf-signature:v1";
@@ -260,23 +263,52 @@ pub fn ingest_fidbf(
     integrity_system_user_id: Uuid,
     integrity_signer: &SystemSigner,
 ) -> Result<IngestResult, IngestError> {
-    let manifest = &signed_manifest.manifest;
-    validate_manifest(manifest)?;
-    let prepared = prepare_submission(manifest, object_path)?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
         .start()
         .map_err(IngestError::Database)?;
+    let result = admit_fidbf(
+        &mut transaction,
+        signed_manifest,
+        object_path,
+        integrity_system_user_id,
+        integrity_signer,
+    )?;
+    transaction.commit().map_err(IngestError::Database)?;
+    Ok(result)
+}
 
+/// Lock the integrity sequencer for the rest of the transaction.
+pub(crate) fn lock_sequencer(transaction: &mut Transaction<'_>) -> Result<(), IngestError> {
     transaction
         .query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended('RELIC:integrity-sequencer:v1', 0))",
             &[],
         )
         .map_err(IngestError::Database)?;
+    Ok(())
+}
+
+/// Verify and admit one FIDBF manifest inside the caller's transaction,
+/// which must be `SERIALIZABLE`; nothing is committed here.
+///
+/// # Errors
+///
+/// As [`ingest_fidbf`].
+pub fn admit_fidbf(
+    transaction: &mut Transaction<'_>,
+    signed_manifest: &SignedFidbfIngestManifest,
+    object_path: &Path,
+    integrity_system_user_id: Uuid,
+    integrity_signer: &SystemSigner,
+) -> Result<IngestResult, IngestError> {
+    let manifest = &signed_manifest.manifest;
+    validate_manifest(manifest)?;
+    let prepared = prepare_submission(manifest, object_path)?;
+    lock_sequencer(transaction)?;
     let analyst_public_key = verify_database_identity(
-        &mut transaction,
+        transaction,
         manifest.analyst_user_id,
         "human",
         Some("analyst"),
@@ -288,34 +320,32 @@ pub fn ingest_fidbf(
         &signed_manifest.analyst_signatures,
     )?;
     verify_database_identity(
-        &mut transaction,
+        transaction,
         integrity_system_user_id,
         "system",
         None,
         Some(&integrity_signer.verifying_key()),
     )?;
 
-    let accepted_at_micros = database_clock_micros(&mut transaction)?;
-    let accepted_at = DateTime::<Utc>::from_timestamp_micros(accepted_at_micros)
-        .ok_or(IngestError::TimestampOutOfRange(accepted_at_micros))?;
+    let (accepted_at, accepted_at_micros) = database_clock(transaction)?;
     insert_authoritative_rows(
-        &mut transaction,
+        transaction,
         manifest,
         &prepared,
         &signed_manifest.analyst_signatures,
         accepted_at,
     )?;
 
-    let (integrity_id, chain_hash) = insert_integrity_entry(
-        &mut transaction,
-        manifest,
-        &prepared,
+    let (integrity_id, chain_hash) = append_integrity_entry(
+        transaction,
+        manifest.source.source_id,
+        &manifest.source.source_type,
+        record_hash_of(&prepared, manifest.analyst_user_id, accepted_at_micros),
         accepted_at,
         accepted_at_micros,
         integrity_system_user_id,
         integrity_signer,
     )?;
-    transaction.commit().map_err(IngestError::Database)?;
 
     Ok(IngestResult {
         source_id: manifest.source.source_id,
@@ -330,20 +360,30 @@ pub fn ingest_fidbf(
     })
 }
 
-fn database_clock_micros(transaction: &mut Transaction<'_>) -> Result<i64, IngestError> {
-    transaction
+/// The database clock, as a timestamp and as microseconds since the epoch.
+pub(crate) fn database_clock(
+    transaction: &mut Transaction<'_>,
+) -> Result<(DateTime<Utc>, i64), IngestError> {
+    let micros: i64 = transaction
         .query_one(
             "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint",
             &[],
         )
-        .map_err(IngestError::Database)
-        .map(|row| row.get(0))
+        .map_err(IngestError::Database)?
+        .get(0);
+    let at = DateTime::<Utc>::from_timestamp_micros(micros)
+        .ok_or(IngestError::TimestampOutOfRange(micros))?;
+    Ok((at, micros))
 }
 
-fn insert_integrity_entry(
+/// Sign and append one integrity entry committing to `record_hash`. The
+/// caller holds the sequencer lock.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_integrity_entry(
     transaction: &mut Transaction<'_>,
-    manifest: &FidbfIngestManifest,
-    prepared: &PreparedSubmission,
+    source_id: Uuid,
+    source_type: &str,
+    record_hash: Digest32,
     accepted_at: DateTime<Utc>,
     accepted_at_micros: i64,
     system_user_id: Uuid,
@@ -358,11 +398,10 @@ fn insert_integrity_entry(
         .map(|row| row.get::<_, String>(0).parse::<Digest32>())
         .transpose()
         .map_err(|_| IngestError::MalformedChainTip)?;
-    let record_hash = record_hash_of(prepared, manifest.analyst_user_id, accepted_at_micros);
     let signed_integrity = sign_entry(
         IntegrityEnvelope {
-            source_id: manifest.source.source_id.to_string(),
-            source_type: manifest.source.source_type.clone(),
+            source_id: source_id.to_string(),
+            source_type: source_type.to_owned(),
             record_hash,
             prev_hash: previous_hash,
             format_version: 1,
@@ -384,8 +423,8 @@ fn insert_integrity_entry(
                      1, $6, $7, $8)
              RETURNING integrity_id",
             &[
-                &manifest.source.source_id,
-                &manifest.source.source_type,
+                &source_id,
+                &source_type,
                 &signed_integrity.envelope.record_hash.to_string(),
                 &signed_integrity
                     .envelope
@@ -681,7 +720,7 @@ fn canonical_fidbf(manifest: &FidbfIngestManifest) -> Vec<u8> {
     )
 }
 
-fn encode_optional(value: Option<&str>) -> Vec<u8> {
+pub(crate) fn encode_optional(value: Option<&str>) -> Vec<u8> {
     value.map_or_else(
         || vec![0],
         |value| {
@@ -725,7 +764,7 @@ fn parse_md5(value: &str) -> Result<CompatibilityMd5, IngestError> {
     Ok(CompatibilityMd5::from_bytes(bytes))
 }
 
-fn verify_database_identity(
+pub(crate) fn verify_database_identity(
     transaction: &mut Transaction<'_>,
     user_id: Uuid,
     expected_owner: &str,

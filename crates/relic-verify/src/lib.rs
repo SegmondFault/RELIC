@@ -24,12 +24,11 @@ use relic_ingest::{
     SignatureHex, SourceInput, admission_record_hash, verify_manifest_signatures,
     verify_source_signature,
 };
-use relic_integrity_worker::{
-    BsimRecord, IntegrityEnvelope, SignedIntegrityEntry, bsim_record_hash,
-};
+use relic_integrity_worker::{IntegrityEnvelope, SignedIntegrityEntry};
 use relic_mmr_worker::{MmrFrontier, Peak, SignedCheckpoint};
 
 mod components;
+mod objects;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -123,13 +122,14 @@ pub fn verify(client: &mut Client) -> Result<Report, postgres::Error> {
     let chain = integrity_chain(&mut tx, &accounts, &mut report)?;
     let mut explained = HashSet::new();
     fidbf_admissions(&mut tx, &accounts, &chain, &mut explained, &mut report)?;
-    bsim_entries(&mut tx, &chain, &mut explained, &mut report)?;
+    objects::bsim(&mut tx, &accounts, &chain, &mut explained, &mut report)?;
+    objects::provenance(&mut tx, &accounts, &chain, &mut explained, &mut report)?;
     for entry in &chain.entries {
         if !explained.contains(&entry.integrity_id) {
             report.fail(
                 "integrity entry",
                 entry.integrity_id,
-                "matches no FIDBF admission or BSim object as currently stored",
+                "matches no FIDBF admission, BSim object or provenance seal as currently stored",
             );
         }
     }
@@ -1063,44 +1063,6 @@ fn fidbf_admissions(
     Ok(())
 }
 
-fn bsim_entries(
-    tx: &mut Transaction<'_>,
-    chain: &Chain,
-    explained: &mut HashSet<i64>,
-    report: &mut Report,
-) -> Result<(), postgres::Error> {
-    let rows = tx.query(
-        "SELECT bsim_id, source_id, sha256::text, md5::text, created_at, submitted_by_user_id,
-                signature
-           FROM catalogue.bsim",
-        &[],
-    )?;
-    for row in &rows {
-        let bsim_id: Uuid = row.get(0);
-        let source_id: Uuid = row.get(1);
-        let sha256: String = row.get(2);
-        let md5: String = row.get(3);
-        let signature: Vec<u8> = row.get(6);
-        let record = bsim_record_hash(&BsimRecord {
-            bsim_id,
-            source_id,
-            sha256: &sha256,
-            md5: &md5,
-            created_at_micros: micros(row.get(4)),
-            submitter: row.get(5),
-            signature: &signature,
-        });
-        match chain.find(source_id, &record.to_string(), None) {
-            Some(integrity_id) => {
-                explained.insert(integrity_id);
-                report.checked("BSim chain entries");
-            }
-            None => report.warn("BSim object", bsim_id, "not yet in the integrity chain"),
-        }
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct StoredPeak {
     start_index: u64,
@@ -1199,12 +1161,8 @@ fn checkpoints(
 fn not_checkable(tx: &mut Transaction<'_>, report: &mut Report) -> Result<(), postgres::Error> {
     let counts = [
         (
-            "BSim object signatures (no format yet)",
-            "SELECT count(*) FROM catalogue.bsim",
-        ),
-        (
-            "provenance (no format yet)",
-            "SELECT count(*) FROM catalogue.provenance",
+            "provenance stored only as an external path (legacy, no signed format)",
+            "SELECT count(*) FROM catalogue.provenance WHERE object_json IS NULL",
         ),
         (
             "batches outside FIDBF admissions",
