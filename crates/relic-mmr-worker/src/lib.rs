@@ -1,5 +1,12 @@
 //! Incremental Merkle Mountain Range frontier, checkpoint signing and
 //! fail-closed PostgreSQL checkpoint admission.
+//!
+//! The [`proof`] module builds and verifies inclusion proofs against a signed
+//! checkpoint without touching the database, and [`client`] checks the API's
+//! JSON form of a proof and its checkpoint.
+
+pub mod client;
+pub mod proof;
 
 use chrono::{DateTime, Utc};
 use postgres::{Client, IsolationLevel, Transaction};
@@ -13,6 +20,35 @@ const NODE_DOMAIN: &[u8] = b"RELIC:mmr-node:v1";
 const COMMITMENT_DOMAIN: &[u8] = b"RELIC:mmr-commitment:v1";
 const CHECKPOINT_DOMAIN: &[u8] = b"RELIC:mmr-checkpoint:v1";
 const SIGNATURE_DOMAIN: &[u8] = b"RELIC:mmr-system-signature:v1";
+
+/// Hash of the leaf at `leaf_index` carrying `chain_hash`.
+///
+/// The single definition shared by [`MmrFrontier::append`] and the proofs, so
+/// the tree and its proofs can never disagree about how a leaf is hashed.
+pub(crate) fn leaf_hash(leaf_index: u64, chain_hash: &Digest32) -> Digest32 {
+    hash_fields(
+        LEAF_DOMAIN,
+        &[&leaf_index.to_be_bytes(), chain_hash.as_bytes()],
+    )
+}
+
+/// Hash of the complete subtree of `height` starting at `start_index`.
+pub(crate) fn node_hash(
+    start_index: u64,
+    height: u32,
+    left: &Digest32,
+    right: &Digest32,
+) -> Digest32 {
+    hash_fields(
+        NODE_DOMAIN,
+        &[
+            &start_index.to_be_bytes(),
+            &height.to_be_bytes(),
+            left.as_bytes(),
+            right.as_bytes(),
+        ],
+    )
+}
 
 /// One complete tree on the left-to-right MMR frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,10 +105,7 @@ impl MmrFrontier {
         let mut right = Peak {
             start_index: leaf_index,
             height: 0,
-            hash: hash_fields(
-                LEAF_DOMAIN,
-                &[&leaf_index.to_be_bytes(), chain_hash.as_bytes()],
-            ),
+            hash: leaf_hash(leaf_index, &chain_hash),
         };
 
         while self
@@ -85,15 +118,7 @@ impl MmrFrontier {
             right = Peak {
                 start_index: left.start_index,
                 height: parent_height,
-                hash: hash_fields(
-                    NODE_DOMAIN,
-                    &[
-                        &left.start_index.to_be_bytes(),
-                        &parent_height.to_be_bytes(),
-                        left.hash.as_bytes(),
-                        right.hash.as_bytes(),
-                    ],
-                ),
+                hash: node_hash(left.start_index, parent_height, &left.hash, &right.hash),
             };
         }
 
