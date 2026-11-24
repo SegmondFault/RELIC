@@ -186,6 +186,10 @@ Only one checkpoint sequencer may advance a format version at a time. The
 worker must be able to reconstruct and compare the expected frontier before it
 continues from a stored checkpoint.
 
+In production it runs every hour from a systemd timer; the units, the
+freshness query and the public-key pinning procedure are in
+[`deployment.md`](deployment.md#hourly-mmr-checkpoint-systemd-timer).
+
 ## Legacy BSim chain reconciliation
 
 `relic-chain-bsim` is a one-shot migration worker for BSim rows admitted before

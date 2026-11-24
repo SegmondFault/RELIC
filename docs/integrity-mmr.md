@@ -224,7 +224,8 @@ pins the construction, and the Python API is tested against the same file.
 **Verification** (`relic_mmr_worker::proof` and `relic-verify-proof`):
 
 1. verify the checkpoint's commitment and Ed25519 system signature with a key
-   obtained independently of the proof;
+   obtained independently of the proof (the operator's published *pin*; see
+   [Pinning the MMR public key](deployment.md#pinning-the-mmr-public-key));
 2. check that the proof and the checkpoint agree on the checkpoint id, leaf
    count and commitment, and that the peaks have the shape the leaf count
    dictates;
@@ -267,12 +268,17 @@ the meaning of an earlier signed checkpoint.
 
 ## Decisions still open
 
-- Checkpoint cadence: every append, time-based, count-based or explicit batch.
+- Checkpoint cadence: decided for now as time-based, every hour from a systemd
+  timer ([`deployment.md`](deployment.md#hourly-mmr-checkpoint-systemd-timer)).
+  Checkpoints per append or per entry count remain open.
 - Whether publication waits for sealing or exposes a visible pending state.
 - Which internal nodes are retained and whether safe pruning is ever allowed.
 - Consistency proofs between two checkpoints.
 - A node cache, so a proof no longer costs the size of its peak (see below).
-- Production key custody and rotation procedure.
+- Production key custody and rotation procedure. Publishing a pin of the
+  public key is documented
+  ([`deployment.md`](deployment.md#pinning-the-mmr-public-key)); rotating the
+  key is not rehearsed.
 - Monitoring thresholds and the operational recovery procedure.
 
 No runtime adapter should quietly settle one of these choices. The selected

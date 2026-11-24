@@ -115,6 +115,138 @@ With a dedicated worker user (see section 1), give the directory to that user
 instead of `ns`. The API never reads these keys, and the directory is not
 mounted into any container.
 
+### Hourly MMR checkpoint (systemd timer)
+
+An integrity entry gets an inclusion proof only once a signed checkpoint
+covers it; until then `GET /v1/integrity/{id}/proof` answers `409`. So
+`relic-checkpoint-mmr` runs every hour. It is safe to run often: when the
+latest checkpoint already covers the whole chain it verifies it and exits
+without inserting anything, and a run can never overlap the previous one
+(one `oneshot` unit). Every run rebuilds the chain from genesis, which is cheap
+at today's size; revisit the interval if the chain grows into millions of rows.
+
+`/etc/relic/mmr.env` (mode 0600, owner `ns`):
+
+```
+RELIC_DATABASE_URL=host=/var/run/postgresql dbname=relic user=relic_worker
+RELIC_MMR_SYSTEM_USER_ID=<MMR system account>
+RELIC_MMR_KEY=/var/lib/relic/keys/mmr_ed25519
+# RELIC_MMR_KEY_PASSPHRASE_FILE=/var/lib/relic/keys/mmr_ed25519.pass   (only if the key has a passphrase)
+```
+
+`/etc/systemd/system/relic-checkpoint-mmr.service`:
+
+```ini
+[Unit]
+Description=RELIC MMR checkpoint (one run)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=ns
+EnvironmentFile=/etc/relic/mmr.env
+ExecStart=/srv/relic/target/release/relic-checkpoint-mmr
+TimeoutStartSec=30min
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+```
+
+`/etc/systemd/system/relic-checkpoint-mmr.timer`:
+
+```ini
+[Unit]
+Description=Hourly RELIC MMR checkpoint
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=1m
+# Run once at boot if the machine was off at the scheduled time.
+Persistent=true
+Unit=relic-checkpoint-mmr.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start relic-checkpoint-mmr.service    # first run now; prints the checkpoint as JSON
+sudo systemctl enable --now relic-checkpoint-mmr.timer
+systemctl list-timers relic-checkpoint-mmr.timer     # next and last run
+journalctl -u relic-checkpoint-mmr -n 50
+```
+
+A failed run leaves the unit in the `failed` state and the previous checkpoint
+untouched, so the next run simply tries again. To check that checkpoints are
+fresh, run this as `relic_auditor` from the hourly `relic-verify` cron job or
+any monitoring that can run SQL:
+
+```sql
+-- No row: no checkpoint yet. uncovered_entries grows as entries are admitted
+-- and falls back to 0 after each run; alert if it stays above 0 for ~2 hours.
+SELECT (SELECT count(*) FROM catalogue.integrity) - c.leaf_count AS uncovered_entries,
+       now() - c.created_at AS age
+FROM catalogue.mmr_checkpoint c
+ORDER BY c.mmr_checkpoint_id DESC LIMIT 1;
+```
+
+`age` is the age of the newest checkpoint, so it also grows when nothing new
+was admitted. Read it together with `uncovered_entries`: an old checkpoint is a
+problem only if `uncovered_entries` is not 0.
+
+### Pinning the MMR public key
+
+An inclusion proof shows that an entry is in a checkpoint **signed by the key
+you give the verifier**. If a client takes that key from the same API that
+serves the proof, whoever controls the API can serve its own key, checkpoint
+and proof together, and everything verifies. The key must come from somewhere
+the API does not control: the operator publishes a *pin* once, and verifiers
+keep it.
+
+The pin is the MMR system account's user id and its Ed25519 public key (64
+lowercase hex characters, the form `relic-verify-proof --public-key` takes).
+
+Operator, once, when the key is created. On the host, derive the pin from the
+key file (add `-P "$(cat <passphrase file>)"` if the key has a passphrase):
+
+```bash
+ssh-keygen -y -f /var/lib/relic/keys/mmr_ed25519 \
+    | awk '{print $2}' | base64 -d | tail -c 32 | od -An -v -tx1 | tr -d ' \n'; echo
+```
+
+Then check that it is the key the database knows for the MMR account. Both
+commands must print the same 64 characters (the worker also refuses to run
+with a key that does not match its registered account):
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$API/v1/users/$MMR_UID" | jq -r .public_key
+```
+
+Each installation generates its own key during its initial setup, so the pin
+belongs to that installation's operator. Give `MMR user id + public key`
+directly to each partner that verifies proofs, by a channel other than the
+API, and publish it where they can find it independently of the API (the
+operator's own site, or [`mmr-public-key.md`](mmr-public-key.md) in this
+repository if you want to record it here, via a pull request that a second
+person checks against the server). That file also says how to hand it over
+and how to replace a key. A change of the published pin is a security event,
+not routine news.
+
+Verifier: always pass the pinned value, never one read from the API:
+
+```bash
+PIN=<64 hex characters from the operator>
+relic-verify-proof --proof proof.json --checkpoint checkpoint.json \
+    --public-key "$PIN" --chain-hash "$CHAIN_HASH"
+```
+
+If the key ever has to change, create a new MMR system account and key,
+publish the new pin **before** its first checkpoint, and keep the old pin:
+checkpoints signed by the old key stay verifiable with it. This has not been
+rehearsed end to end, and key custody and rotation as a whole remain an open
+decision in [`integrity-mmr.md`](integrity-mmr.md#decisions-still-open).
+
 ## 5. Object storage and `relic-admit`
 
 The API stages uploaded FIDBF objects in `/var/lib/relic/staging` (its only
