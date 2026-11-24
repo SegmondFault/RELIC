@@ -1,8 +1,9 @@
 # Integrity service and Merkle Mountain Range
 
-> **Status:** the pure Rust hashing, frontier and checkpoint-signing core is
-> implemented. The production PostgreSQL adapter, key-custody integration,
-> proof API, service supervision and publication states remain future work.
+> **Status:** the pure Rust hashing, frontier and checkpoint-signing core, the
+> PostgreSQL checkpoint worker, inclusion proofs (Rust and API) and the offline
+> proof verifier are implemented. Consistency proofs, key-custody integration,
+> service supervision and publication states remain future work.
 
 This page records the intended boundary for RELIC's future append-only
 integrity layer. It is deliberately descriptive rather than executable so the
@@ -84,7 +85,9 @@ The design separates the tree algorithm from storage and operations:
 
 - **`relic-mmr-worker`** contains the Rust append, peak, commitment and
   checkpoint-signing implementation plus the fail-closed PostgreSQL
-  reconciler exposed as `relic-checkpoint-mmr`. Proofs remain future work.
+  reconciler exposed as `relic-checkpoint-mmr`, and the inclusion-proof
+  construction and verification (`proof` module) with the offline
+  `relic-verify-proof` command (`client` module).
 - **`relic-checkpoint-mmr`** is the current explicit one-shot operational
   entry point. It independently rebuilds the integrity chain, verifies the
   latest checkpoint, signs any advanced frontier and inserts once.
@@ -133,7 +136,7 @@ The implemented calculation fixes these rules:
 
 Changing any of these is a format migration, not a silent implementation
 detail. No leaf duplication or invented padding leaf is used to handle an odd
-count. Deterministic proof encoding remains future work.
+count. The inclusion-proof encoding is specified below.
 
 ## Database responsibilities
 
@@ -192,6 +195,65 @@ object digest, integrity-chain hash and integrity system signature have been
 committed in one database transaction. MMR status is a separate derived state;
 a delayed checkpoint does not weaken the integrity admission rule.
 
+## Inclusion proofs
+
+An inclusion proof shows that one integrity row (a leaf) is covered by a
+signed checkpoint, without downloading or replaying the chain.
+
+**What a proof is.** Every peak is a perfect binary tree whose first leaf is a
+multiple of its size, so the path from a leaf to its peak follows from the leaf
+index alone. A proof is only the sibling hashes from the leaf level upwards,
+plus the leaf index and the leaf count of the checkpoint it targets. The
+sibling at level `k` is on the right when bit `k` of the leaf index is `0`, and
+on the left otherwise. The number of siblings is the height of the peak that
+holds the leaf, and that peak is fixed by the leaf count (the set bits of
+`leaf_count`, largest first). A proof is logarithmic: 10 hashes for 1 024
+leaves. It is only meaningful for the `leaf_count` it names; a later checkpoint
+needs its own proof, and an earlier checkpoint stays provable.
+
+**Encoding (version 1).** Canonical JSON with exactly these fields, lowercase
+hexadecimal digests and no others (unknown fields and versions are rejected):
+
+```json
+{"format_version": 1, "leaf_index": 4, "leaf_count": 6, "siblings": ["<64 hex>"]}
+```
+
+The Rust crate is the source of truth; `crates/relic-mmr-worker/tests/vectors/inclusion-v1.json`
+pins the construction, and the Python API is tested against the same file.
+
+**Verification** (`relic_mmr_worker::proof` and `relic-verify-proof`):
+
+1. verify the checkpoint's commitment and Ed25519 system signature with a key
+   obtained independently of the proof;
+2. check that the proof and the checkpoint agree on the checkpoint id, leaf
+   count and commitment, and that the peaks have the shape the leaf count
+   dictates;
+3. fold the leaf (`chain_hash`) and the siblings into a peak and require it to
+   be one of the checkpoint's signed peaks.
+
+A client that recomputed an entry's chain hash itself should pass it as
+`--chain-hash`; otherwise the proof only shows that the server's claim is
+consistent with its own signed checkpoint.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/integrity/$ID/proof?checkpoint_id=$N" > proof.json
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/mmr-checkpoints/$N"                   > checkpoint.json
+relic-verify-proof --proof proof.json --checkpoint checkpoint.json \
+    --public-key "$SYSTEM_PUBLIC_KEY" --chain-hash "$CHAIN_HASH"
+```
+
+**API** (`GET /v1/integrity/{id}/proof`, any role). The server builds the proof
+from the integrity chain and checks it against the stored checkpoint before
+answering; if they disagree it answers `500` and logs the cause rather than
+serve a proof the checkpoint would reject.
+
+**Cost.** Internal nodes are not stored, so a proof rebuilds the peak that holds
+the entry: work proportional to that peak's size, run off the event loop.
+`RELIC_PROOF_MAX_PEAK_LEAVES` (default 262 144) caps it and larger peaks are
+refused with `503`; `RELIC_PROOF_RATE_LIMIT_PER_MINUTE` limits each account.
+The oldest entries always sit in the largest peak, so this cap is what a node
+cache would lift once the chain outgrows it.
+
 ## Verification and recovery
 
 RELIC must be able to rebuild the expected MMR independently from the immutable
@@ -199,8 +261,8 @@ leaves and compare it with stored nodes, peaks and signed checkpoints. A
 rebuild defaults to dry-run and reports the first divergence. Recovery must not
 overwrite conflicting evidence merely to make verification pass.
 
-Proof generation and verification must state which checkpoint and leaf count
-they target. A later checkpoint may cover more leaves, but it must not change
+Proof generation and verification state which checkpoint and leaf count they
+target (see [Inclusion proofs](#inclusion-proofs)). A later checkpoint may cover more leaves, but it must not change
 the meaning of an earlier signed checkpoint.
 
 ## Decisions still open
@@ -208,7 +270,8 @@ the meaning of an earlier signed checkpoint.
 - Checkpoint cadence: every append, time-based, count-based or explicit batch.
 - Whether publication waits for sealing or exposes a visible pending state.
 - Which internal nodes are retained and whether safe pruning is ever allowed.
-- Proof API, proof encoding and proof-retention requirements.
+- Consistency proofs between two checkpoints.
+- A node cache, so a proof no longer costs the size of its peak (see below).
 - Production key custody and rotation procedure.
 - Monitoring thresholds and the operational recovery procedure.
 
