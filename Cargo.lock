@@ -1325,6 +1325,7 @@ dependencies = [
  "relic-crypto",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "uuid",
  "zeroize",
