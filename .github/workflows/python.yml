@@ -1,0 +1,71 @@
+name: Python API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token: this workflow never needs to write to the repository.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same branch or pull request.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pytest:
+    name: API tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    # Disposable server: the test session drops and recreates its `relic`
+    # database (database/tests/setup-disposable-db.sh). Never reuse real
+    # credentials here.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      RELIC_TEST_SUPERUSER_URL: postgresql://postgres:postgres@127.0.0.1:5432
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Some API tests drive the real Rust binaries (signer, admission,
+      # verifier, MMR proof checker). They skip when a binary is missing, so
+      # build them all first; the check at the end fails the job on any skip.
+      - run: cargo build --workspace --locked
+      # Same Python as database/api/Dockerfile.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: database/api/requirements*.txt
+      - run: pip install -r database/api/requirements-dev.txt
+      # The database setup script uses the psql client.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Run the API tests
+        shell: bash
+        working-directory: database/api
+        run: |
+          python -m pytest 2>&1 | tee pytest.log
+          # A skipped test is a test that did not run: fail instead of passing silently.
+          if grep -q "^SKIPPED" pytest.log; then
+            echo "::error::Some tests were skipped; see the SKIPPED lines above."
+            exit 1
+          fi
