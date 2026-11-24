@@ -1,0 +1,1594 @@
+-- RELIC migration 008: key-challenge authentication, pending BYO-key
+-- registration and RBAC hardening.
+--
+-- Applies on top of relic-schema-v1.sql + relic-access-v1.sql (fresh install)
+-- and on top of migration 007 (upgraded server).
+--
+-- * Login proves possession of a registered Ed25519 key by signing a
+--   single-use server challenge. The client identifies itself by its public
+--   key (unique across all accounts); no User ID or password is needed.
+-- * Registrations stay pending outside user_public until an active Moderator
+--   decides them. Approval is the only path for relic_app to create a human
+--   account; system accounts and the first Moderator are created by the
+--   database operator as relic_owner.
+-- * Account role is immutable, Ed25519 keys are exactly 32 bytes and unique.
+-- * Revocation requests and decisions carry 64-byte Ed25519 signatures,
+--   decisions are final and timestamped by the database, a Moderator cannot
+--   decide a revocation of their own account, a target has at most one open
+--   request, and an already revoked target cannot be requested again.
+-- * The requester must be an active Analyst when filing, not when the request
+--   is decided, so revoking the requester cannot leave a request undecidable.
+-- * System accounts (integrity and MMR workers) can only be revoked by the
+--   database operator: revoking one stops admissions and checkpoints.
+-- * FIDBF, BSim and provenance submitters must be Analysts.
+-- * Signed evidence tables are no longer updatable by relic_app.
+-- * Flags and flag responses carry 64-byte Ed25519 signatures, a Viewer can
+--   flag a target once, revoked targets and revoked flags take no new flags
+--   or responses, and flag responses can themselves be flagged and revoked.
+-- * Every stored signature (corpus objects, integrity entries, MMR
+--   checkpoints) must be a 64-byte Ed25519 signature.
+-- * Workers get their own login, relic_worker; the API's relic_app can no
+--   longer append to the integrity chain or MMR checkpoints, and inserts
+--   only into the tables its routes write (new tables: read-only by default).
+-- * relic_auditor: a read-only login for relic-verify.
+-- * Classifications keep their evidence as the exact signed JSON text, are
+--   immutable, and like licence assertions are refused on revoked targets.
+-- * Approving a Moderator registration, and approving the revocation of a
+--   Moderator account, need two different active Moderators.
+-- * Foreign-key indexes used by filtered catalogue lists also cover the
+--   primary key, so each cursor page is a single index range scan.
+
+\set ON_ERROR_STOP on
+
+BEGIN;
+
+-- The integrity, MMR and FIDBF-admission workers get their own database login,
+-- separate from the API's relic_app (see "Database logins" below). Creating a
+-- role needs the superuser, so this runs before SET ROLE. It starts NOLOGIN;
+-- the operator enables it with a password where workers run:
+--   ALTER ROLE relic_worker LOGIN PASSWORD '...';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_worker') THEN
+        CREATE ROLE relic_worker NOLOGIN;
+    END IF;
+END
+$$;
+GRANT CONNECT ON DATABASE relic TO relic_worker;
+ALTER ROLE relic_worker IN DATABASE relic SET search_path = catalogue, public;
+
+-- relic-verify re-checks every stored signature and the chain; it only reads.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'relic_auditor') THEN
+        CREATE ROLE relic_auditor NOLOGIN;
+    END IF;
+END
+$$;
+GRANT CONNECT ON DATABASE relic TO relic_auditor;
+ALTER ROLE relic_auditor IN DATABASE relic SET search_path = catalogue, public;
+ALTER ROLE relic_auditor IN DATABASE relic SET default_transaction_read_only = on;
+
+SET ROLE relic_owner;
+SET search_path = catalogue, public;
+
+-- Tables created from here on (including this migration's own) give relic_app
+-- no INSERT or UPDATE unless a GRANT below says so. Revoked first, before any
+-- CREATE TABLE: relic-access-v1.sql's default would otherwise grant both.
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue REVOKE INSERT, UPDATE ON TABLES FROM relic_app;
+
+-- ---------------------------------------------------------------------------
+-- Account identity
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE user_public
+    ADD CONSTRAINT user_public_ed25519_key_length
+    CHECK (octet_length(public_key) = 32);
+
+CREATE UNIQUE INDEX user_public_public_key_idx ON user_public (public_key);
+
+CREATE OR REPLACE FUNCTION prevent_account_identity_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF NEW.user_id <> OLD.user_id
+       OR NEW.public_key IS DISTINCT FROM OLD.public_key
+       OR NEW.owner_type <> OLD.owner_type
+       OR NEW.role IS DISTINCT FROM OLD.role
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+        RAISE EXCEPTION
+            'UserID, public key, owner type, role and creation time are immutable; create a new account instead'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+ALTER TABLE user_private
+    ALTER COLUMN password_hash DROP NOT NULL,
+    ALTER COLUMN password_salt DROP NOT NULL;
+
+COMMENT ON COLUMN user_private.password_hash IS
+    'Deprecated by migration 008: login is Ed25519 challenge-response. Retained only for legacy rows.';
+COMMENT ON COLUMN user_private.password_salt IS
+    'Deprecated by migration 008: login is Ed25519 challenge-response. Retained only for legacy rows.';
+
+-- ---------------------------------------------------------------------------
+-- Single-use authentication challenges
+-- ---------------------------------------------------------------------------
+
+CREATE TYPE auth_challenge_purpose AS ENUM (
+    'login',
+    'registration'
+);
+
+CREATE TABLE auth_challenge (
+    challenge_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    purpose auth_challenge_purpose NOT NULL,
+    -- Deliberately bound to no account: issuing a challenge reveals nothing
+    -- about which keys or accounts exist. The signed login record names the
+    -- public key instead.
+    nonce bytea NOT NULL UNIQUE CHECK (octet_length(nonce) = 32),
+    audience text NOT NULL CHECK (btrim(audience) <> ''),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    CHECK (expires_at > created_at),
+    CHECK (expires_at <= created_at + interval '10 minutes'),
+    CHECK (consumed_at IS NULL OR consumed_at >= created_at)
+);
+
+COMMENT ON TABLE auth_challenge IS
+    'Server-issued single-use nonces for login and registration proof-of-possession. Signatures over them are verified by the application; the database enforces single use and expiry.';
+
+CREATE FUNCTION guard_auth_challenge()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.consumed_at IS NOT NULL THEN
+            RAISE EXCEPTION 'A new challenge cannot already be consumed'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        NEW.created_at := clock_timestamp();
+        RETURN NEW;
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.expires_at < clock_timestamp() - interval '1 day'
+           AND NOT EXISTS (
+               SELECT 1 FROM registration_request
+                WHERE challenge_id = OLD.challenge_id
+           ) THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Only long-expired, unreferenced challenges may be removed'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NEW.challenge_id <> OLD.challenge_id
+       OR NEW.purpose <> OLD.purpose
+       OR NEW.nonce <> OLD.nonce
+       OR NEW.audience <> OLD.audience
+       OR NEW.created_at <> OLD.created_at
+       OR NEW.expires_at <> OLD.expires_at THEN
+        RAISE EXCEPTION 'Only consumption may change a challenge'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF OLD.consumed_at IS NOT NULL THEN
+        RAISE EXCEPTION 'Challenge % was already consumed', OLD.challenge_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.consumed_at IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    NEW.consumed_at := clock_timestamp();
+    IF NEW.consumed_at >= OLD.expires_at THEN
+        RAISE EXCEPTION 'Challenge % has expired', OLD.challenge_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER auth_challenge_guard
+BEFORE INSERT OR UPDATE OR DELETE ON auth_challenge
+FOR EACH ROW EXECUTE FUNCTION guard_auth_challenge();
+
+-- Bounded housekeeping callable by relic_app, which has no DELETE privilege.
+-- Challenges referenced by a registration request are kept as evidence.
+CREATE FUNCTION purge_expired_auth_challenges()
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    removed bigint;
+BEGIN
+    DELETE FROM auth_challenge AS c
+     WHERE c.expires_at < clock_timestamp() - interval '1 day'
+       AND NOT EXISTS (
+           SELECT 1 FROM registration_request AS r
+            WHERE r.challenge_id = c.challenge_id
+       );
+    GET DIAGNOSTICS removed = ROW_COUNT;
+    RETURN removed;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Pending BYO-key registration
+-- ---------------------------------------------------------------------------
+
+CREATE TYPE registration_decision AS ENUM (
+    'approved',
+    'rejected'
+);
+
+CREATE TABLE registration_request (
+    registration_request_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    challenge_id uuid NOT NULL UNIQUE
+        REFERENCES auth_challenge(challenge_id) ON DELETE RESTRICT,
+    public_key bytea NOT NULL CHECK (octet_length(public_key) = 32),
+    requested_role account_role NOT NULL,
+    name text NOT NULL CHECK (btrim(name) <> ''),
+    organisation text CHECK (organisation IS NULL OR btrim(organisation) <> ''),
+    email text NOT NULL CHECK (btrim(email) <> ''),
+    proof_signature bytea NOT NULL CHECK (octet_length(proof_signature) = 64),
+    requested_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    moderator_id uuid REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    decision registration_decision,
+    decided_at timestamptz,
+    decision_signature bytea,
+    user_id uuid UNIQUE REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    CHECK (
+        (
+            decision IS NULL
+            AND moderator_id IS NULL
+            AND decided_at IS NULL
+            AND decision_signature IS NULL
+            AND user_id IS NULL
+        )
+        OR
+        (
+            decision IS NOT NULL
+            AND moderator_id IS NOT NULL
+            AND decided_at IS NOT NULL
+            AND octet_length(decision_signature) = 64
+            AND (decision = 'approved') = (user_id IS NOT NULL)
+        )
+    )
+);
+
+COMMENT ON TABLE registration_request IS
+    'BYO-key registration awaiting a signed Moderator decision. Pending requests are not identities and cannot sign corpus data.';
+
+CREATE UNIQUE INDEX registration_request_open_key_idx
+    ON registration_request (public_key)
+    WHERE decision IS NULL;
+
+CREATE FUNCTION guard_registration_request()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Registration requests are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.decision IS NOT NULL THEN
+            RAISE EXCEPTION 'A registration request must start pending'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        IF EXISTS (SELECT 1 FROM user_public WHERE public_key = NEW.public_key) THEN
+            RAISE EXCEPTION 'This public key is already registered'
+                USING ERRCODE = 'unique_violation';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM auth_challenge
+             WHERE challenge_id = NEW.challenge_id
+               AND purpose = 'registration'
+               AND consumed_at IS NOT NULL
+        ) THEN
+            RAISE EXCEPTION 'Registration requires a consumed registration challenge'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        NEW.requested_at := clock_timestamp();
+        RETURN NEW;
+    END IF;
+
+    IF OLD.decision IS NOT NULL THEN
+        RAISE EXCEPTION 'Registration decisions are final'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.registration_request_id <> OLD.registration_request_id
+       OR NEW.challenge_id <> OLD.challenge_id
+       OR NEW.public_key <> OLD.public_key
+       OR NEW.requested_role <> OLD.requested_role
+       OR NEW.name <> OLD.name
+       OR NEW.organisation IS DISTINCT FROM OLD.organisation
+       OR NEW.email <> OLD.email
+       OR NEW.proof_signature <> OLD.proof_signature
+       OR NEW.requested_at <> OLD.requested_at THEN
+        RAISE EXCEPTION 'A registration request cannot be altered'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.decision IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM user_public
+             WHERE user_id = NEW.moderator_id
+               AND owner_type = 'human'
+               AND role = 'moderator'
+        ) OR account_is_revoked(NEW.moderator_id) THEN
+            RAISE EXCEPTION 'Registration decision requires an active Moderator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        NEW.decided_at := clock_timestamp();
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER registration_request_guard
+BEFORE INSERT OR UPDATE OR DELETE ON registration_request
+FOR EACH ROW EXECUTE FUNCTION guard_registration_request();
+
+-- The only way relic_app can create a human account. The Moderator's
+-- decision signature is verified by the application before this call.
+CREATE FUNCTION decide_registration(
+    p_registration_request_id uuid,
+    p_moderator_id uuid,
+    p_decision registration_decision,
+    p_decision_signature bytea
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    request registration_request%ROWTYPE;
+    new_user_id uuid;
+BEGIN
+    SELECT * INTO request
+      FROM registration_request
+     WHERE registration_request_id = p_registration_request_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Unknown registration request %', p_registration_request_id
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    IF p_decision = 'approved' THEN
+        new_user_id := gen_random_uuid();
+        INSERT INTO user_public (user_id, public_key, role, owner_type)
+        VALUES (new_user_id, request.public_key, request.requested_role, 'human');
+        INSERT INTO user_private (user_id, name, organisation, email)
+        VALUES (new_user_id, request.name, request.organisation, request.email);
+    END IF;
+
+    -- The row trigger validates the Moderator and finality.
+    UPDATE registration_request
+       SET moderator_id = p_moderator_id,
+           decision = p_decision,
+           decided_at = clock_timestamp(),
+           decision_signature = p_decision_signature,
+           user_id = new_user_id
+     WHERE registration_request_id = p_registration_request_id;
+
+    RETURN new_user_id;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Revocation: final, database-timestamped, never self-decided
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE revocation
+    ADD CONSTRAINT revocation_request_signature_ed25519
+        CHECK (octet_length(request_signature) = 64),
+    ADD CONSTRAINT revocation_decision_signature_ed25519
+        CHECK (decision_signature IS NULL OR octet_length(decision_signature) = 64);
+
+-- At most one open request per target; the API reports a duplicate as 409.
+CREATE UNIQUE INDEX revocation_open_target_idx
+    ON revocation (target_type, target_id)
+    WHERE decision IS NULL;
+
+-- Replaces the schema v1 version, which re-checked the requester on every
+-- update: a request filed by an Analyst who was revoked afterwards could then
+-- never be decided, and the one-open-request rule below would block its
+-- target for good. The requester is checked once, when the request is filed;
+-- the deciding Moderator is checked whenever a decision is recorded.
+-- The requester can be an Analyst (for a catalogue entry) or a Moderator (for
+-- an account), so the column is no longer named after Analysts.
+ALTER TABLE revocation RENAME COLUMN analyst_request_id TO requester_id;
+
+-- Analysts request revocation of catalogue entries; Moderators revoke
+-- accounts. An Analyst cannot open a case against an account (they flag it
+-- instead, or a Moderator acts), and a Moderator cannot target their own.
+CREATE OR REPLACE FUNCTION validate_revocation_actors()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    requester_role account_role;
+    requester_owner account_owner_type;
+    expected_role account_role;
+    moderator_role account_role;
+    moderator_owner account_owner_type;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        expected_role := CASE WHEN NEW.target_type = 'user'
+                              THEN 'moderator' ELSE 'analyst' END;
+        SELECT role, owner_type
+          INTO requester_role, requester_owner
+          FROM user_public
+         WHERE user_id = NEW.requester_id;
+
+        IF NOT FOUND
+           OR requester_owner <> 'human'
+           OR requester_role IS DISTINCT FROM expected_role
+           OR account_is_revoked(NEW.requester_id) THEN
+            RAISE EXCEPTION 'Accounts are revoked at an active Moderator''s request, catalogue entries at an active Analyst''s'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        IF NEW.target_type = 'user' AND NEW.target_id = NEW.requester_id THEN
+            RAISE EXCEPTION 'A Moderator cannot request the revocation of their own account'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+    END IF;
+
+    IF NEW.decision IS NOT NULL THEN
+        SELECT role, owner_type
+          INTO moderator_role, moderator_owner
+          FROM user_public
+         WHERE user_id = NEW.moderator_id;
+
+        IF NOT FOUND
+           OR moderator_owner <> 'human'
+           OR moderator_role <> 'moderator'
+           OR account_is_revoked(NEW.moderator_id) THEN
+            RAISE EXCEPTION 'Revocation decision requires an active Moderator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+-- relic_owner (and superusers) are the database operator.
+CREATE FUNCTION is_database_operator()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT pg_has_role(current_user, 'relic_owner', 'USAGE');
+$$;
+
+CREATE FUNCTION guard_revocation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Revocations are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.decision IS NOT NULL THEN
+            RAISE EXCEPTION 'A revocation request must start pending'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM revocation
+             WHERE target_type = NEW.target_type
+               AND target_id = NEW.target_id
+               AND decision = 'approved'
+        ) THEN
+            RAISE EXCEPTION 'Target %.% is already revoked', NEW.target_type, NEW.target_id
+                USING ERRCODE = 'unique_violation';
+        END IF;
+        IF NEW.target_type = 'user'
+           AND NOT is_database_operator()
+           AND EXISTS (
+               SELECT 1 FROM user_public
+                WHERE user_id = NEW.target_id AND owner_type = 'system'
+           ) THEN
+            RAISE EXCEPTION 'System accounts can only be revoked by the database operator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        NEW.requested_at := clock_timestamp();
+        RETURN NEW;
+    END IF;
+
+    IF OLD.decision IS NOT NULL THEN
+        RAISE EXCEPTION 'Revocation decisions are final'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.revocation_id <> OLD.revocation_id
+       OR NEW.requester_id <> OLD.requester_id
+       OR NEW.target_type <> OLD.target_type
+       OR NEW.target_id <> OLD.target_id
+       OR NEW.reason <> OLD.reason
+       OR NEW.requested_at <> OLD.requested_at
+       OR NEW.request_signature <> OLD.request_signature THEN
+        RAISE EXCEPTION 'A revocation request cannot be altered'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+
+    IF NEW.decision IS NOT NULL THEN
+        IF NEW.target_type = 'user' AND NEW.target_id = NEW.moderator_id THEN
+            RAISE EXCEPTION 'A Moderator cannot decide the revocation of their own account'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        IF NEW.target_type = 'user'
+           AND NOT is_database_operator()
+           AND EXISTS (
+               SELECT 1 FROM user_public
+                WHERE user_id = NEW.target_id AND owner_type = 'system'
+           ) THEN
+            RAISE EXCEPTION 'System accounts can only be revoked by the database operator'
+                USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        NEW.decided_at := clock_timestamp();
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER revocation_is_final
+BEFORE INSERT OR UPDATE OR DELETE ON revocation
+FOR EACH ROW EXECUTE FUNCTION guard_revocation();
+
+-- ---------------------------------------------------------------------------
+-- Licence assertions and classifications
+-- ---------------------------------------------------------------------------
+
+-- A classification's evidence is signed as the exact JSON text the Analyst
+-- submitted. jsonb reorders keys and rewrites numbers, so that text is kept
+-- verbatim beside the queryable jsonb and must parse to the same value.
+ALTER TABLE classification
+    ADD COLUMN evidence_json text,
+    ADD CONSTRAINT classification_evidence_verbatim
+        CHECK ((evidence IS NULL) = (evidence_json IS NULL)
+               AND (evidence_json IS NULL OR evidence_json::jsonb = evidence)),
+    ADD CONSTRAINT classification_misp_pair
+        CHECK ((misp_universe IS NULL) = (misp_uuid IS NULL)),
+    ADD CONSTRAINT classification_misp_universe_nonblank
+        CHECK (misp_universe IS NULL OR btrim(misp_universe) <> '');
+
+COMMENT ON COLUMN classification.evidence_json IS
+    'Evidence JSON exactly as signed; evidence is the same value as jsonb.';
+
+-- Revoked provenance is no evidence: a claim may not cite it.
+CREATE FUNCTION reject_revoked_evidence(evidence_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF evidence_id IS NOT NULL AND target_is_revoked('provenance', evidence_id) THEN
+        RAISE EXCEPTION 'Evidence provenance % is revoked', evidence_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+END;
+$$;
+
+-- Like flags: nothing new is asserted about a revoked target, and created_at
+-- comes from the database clock.
+CREATE FUNCTION guard_license_assertion()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Target % is revoked', coalesce(NEW.source_id, NEW.binary_id)
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER license_assertion_target_not_revoked
+BEFORE INSERT ON license_assertion
+FOR EACH ROW EXECUTE FUNCTION guard_license_assertion();
+
+CREATE FUNCTION guard_classification()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Classifications are immutable; append a replacement and revoke this classification'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the role and existence checks (triggers run in name order).
+CREATE TRIGGER classification_target_not_revoked
+BEFORE INSERT OR UPDATE OR DELETE ON classification
+FOR EACH ROW EXECUTE FUNCTION guard_classification();
+
+-- ---------------------------------------------------------------------------
+-- Software components, releases, component assertions, compositions
+-- ---------------------------------------------------------------------------
+
+-- Every row an Analyst writes is signed. Components and releases had no
+-- signature in schema v1; the database is empty when 008 runs.
+ALTER TABLE software_component
+    ADD COLUMN signature bytea NOT NULL,
+    ADD CONSTRAINT software_component_signature_ed25519 CHECK (octet_length(signature) = 64),
+    ADD CONSTRAINT software_component_namespace_nonblank
+        CHECK (namespace IS NULL OR btrim(namespace) <> ''),
+    ADD CONSTRAINT software_component_purl_syntax
+        CHECK (purl IS NULL OR purl ~ '^pkg:[a-z][a-z0-9.+-]*/[^[:space:]]+$');
+
+ALTER TABLE software_release
+    ADD COLUMN signature bytea NOT NULL,
+    ADD CONSTRAINT software_release_signature_ed25519 CHECK (octet_length(signature) = 64),
+    ADD CONSTRAINT software_release_version_nonblank
+        CHECK (version IS NULL OR btrim(version) <> '');
+
+-- A composition is signed together with its full member list, so the members
+-- are written in the composition's own transaction and never later: the row
+-- states how many there are, a member beyond that count is refused, and at
+-- commit the count must be reached. A compromised API therefore cannot add a
+-- member to an existing (perhaps already classified) composition.
+ALTER TABLE behavioural_composition
+    ADD COLUMN member_count integer NOT NULL,
+    ADD CONSTRAINT behavioural_composition_member_count
+        CHECK (member_count BETWEEN 1 AND 500),
+    ADD CONSTRAINT behavioural_composition_description_nonblank
+        CHECK (description IS NULL OR btrim(description) <> '');
+
+-- An asserted order names each position once; unordered members (NULL) are
+-- free.
+CREATE UNIQUE INDEX composition_member_sequence_idx
+    ON composition_member (behavioural_composition_id, sequence_number)
+    WHERE sequence_number IS NOT NULL;
+
+COMMENT ON COLUMN behavioural_composition.member_count IS
+    'Number of members, all signed with the composition and written in its transaction.';
+
+CREATE FUNCTION stamp_created_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER software_component_stamped
+BEFORE INSERT ON software_component
+FOR EACH ROW EXECUTE FUNCTION stamp_created_at();
+
+-- Nothing new is built on a revoked row (as for flags and claims).
+CREATE FUNCTION guard_software_release()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('software_component', NEW.component_id) THEN
+        RAISE EXCEPTION 'Software component % is revoked', NEW.component_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.source_id IS NOT NULL AND target_is_revoked('source', NEW.source_id) THEN
+        RAISE EXCEPTION 'Source % is revoked', NEW.source_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER software_release_target_not_revoked
+BEFORE INSERT ON software_release
+FOR EACH ROW EXECUTE FUNCTION guard_software_release();
+
+CREATE FUNCTION guard_binary_component_assertion()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Binary % is revoked', NEW.binary_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked('software_release', NEW.software_release_id)
+       OR target_is_revoked('software_component', (
+              SELECT component_id FROM software_release
+               WHERE software_release_id = NEW.software_release_id)) THEN
+        RAISE EXCEPTION 'Software release % or its component is revoked', NEW.software_release_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER binary_component_assertion_target_not_revoked
+BEFORE INSERT ON binary_component_assertion
+FOR EACH ROW EXECUTE FUNCTION guard_binary_component_assertion();
+
+CREATE FUNCTION guard_behavioural_composition()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    PERFORM reject_revoked_evidence(NEW.evidence_provenance_id);
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER behavioural_composition_stamped
+BEFORE INSERT ON behavioural_composition
+FOR EACH ROW EXECUTE FUNCTION guard_behavioural_composition();
+
+CREATE FUNCTION guard_composition_member()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    expected integer;
+BEGIN
+    -- No lock needed: until its transaction commits, no other transaction
+    -- sees the composition (so cannot reference it), and once committed it
+    -- already has every member.
+    SELECT member_count INTO expected
+      FROM behavioural_composition
+     WHERE behavioural_composition_id = NEW.behavioural_composition_id;
+    IF (SELECT count(*) FROM composition_member
+         WHERE behavioural_composition_id = NEW.behavioural_composition_id) >= expected THEN
+        RAISE EXCEPTION 'Behavioural composition % already has all % members',
+            NEW.behavioural_composition_id, expected
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the existence and classification checks.
+CREATE TRIGGER composition_member_within_count
+BEFORE INSERT ON composition_member
+FOR EACH ROW EXECUTE FUNCTION guard_composition_member();
+
+CREATE FUNCTION check_composition_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+DECLARE
+    present integer;
+BEGIN
+    SELECT count(*) INTO present FROM composition_member
+     WHERE behavioural_composition_id = NEW.behavioural_composition_id;
+    IF present <> NEW.member_count THEN
+        RAISE EXCEPTION 'Behavioural composition % has % of its % members',
+            NEW.behavioural_composition_id, present, NEW.member_count
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Checked at commit, once the composition's transaction has written its members.
+CREATE CONSTRAINT TRIGGER behavioural_composition_members_complete
+AFTER INSERT ON behavioural_composition
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION check_composition_complete();
+
+-- ---------------------------------------------------------------------------
+-- BSim and provenance objects, staged submissions
+-- ---------------------------------------------------------------------------
+
+-- A BSim object or provenance seal is signed as the exact JSON text the
+-- Analyst submitted (jsonb reorders keys and rewrites numbers). That text is
+-- kept verbatim, must parse to the stored jsonb, and the stored SHA-256 and
+-- MD5 are its digests, so the row cannot disagree with what was signed.
+ALTER TABLE bsim
+    ADD COLUMN object_json text NOT NULL,
+    ADD CONSTRAINT bsim_object_verbatim CHECK (object_json::jsonb = object_data),
+    ADD CONSTRAINT bsim_object_is_json_object CHECK (jsonb_typeof(object_data) = 'object'),
+    ADD CONSTRAINT bsim_digests_match_object CHECK (
+        sha256::text = encode(sha256(convert_to(object_json, 'UTF8')), 'hex')
+        AND md5::text = md5(convert_to(object_json, 'UTF8')));
+
+COMMENT ON COLUMN bsim.object_json IS
+    'The BSim object exactly as signed; object_data is the same value as jsonb, sha256 and md5 are its digests.';
+
+ALTER TABLE provenance
+    ADD COLUMN object_json text,
+    ADD CONSTRAINT provenance_object_verbatim CHECK (
+        (object_json IS NULL) = (object_data IS NULL)
+        AND (object_json IS NULL OR object_json::jsonb = object_data)),
+    ADD CONSTRAINT provenance_digests_match_object CHECK (
+        object_json IS NULL
+        OR (sha256::text = encode(sha256(convert_to(object_json, 'UTF8')), 'hex')
+            AND md5::text = md5(convert_to(object_json, 'UTF8'))));
+
+COMMENT ON COLUMN provenance.object_json IS
+    'The inline seal exactly as signed; object_data is the same value as jsonb, sha256 and md5 are its digests.';
+
+-- Nothing new is admitted on a revoked source, binary, function or object.
+CREATE FUNCTION guard_bsim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id) THEN
+        RAISE EXCEPTION 'Source % is revoked', NEW.source_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER bsim_target_not_revoked
+BEFORE INSERT ON bsim
+FOR EACH ROW EXECUTE FUNCTION guard_bsim();
+
+CREATE FUNCTION guard_function_bsim()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('function', NEW.function_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'Function % or its binary is revoked', NEW.function_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER function_bsim_target_not_revoked
+BEFORE INSERT ON function_bsim
+FOR EACH ROW EXECUTE FUNCTION guard_function_bsim();
+
+CREATE FUNCTION guard_provenance()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('source', NEW.source_id)
+       OR target_is_revoked('fidbf', NEW.fidbf_id)
+       OR target_is_revoked('bsim', NEW.bsim_id)
+       OR target_is_revoked('binary', NEW.binary_id) THEN
+        RAISE EXCEPTION 'A target of provenance % is revoked', NEW.provenance_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER provenance_target_not_revoked
+BEFORE INSERT ON provenance
+FOR EACH ROW EXECUTE FUNCTION guard_provenance();
+
+-- The API never holds the integrity key, so it cannot admit FIDBF, BSim or
+-- provenance (each takes an integrity-chain entry). It stages the signed
+-- submission here instead; relic-admit, running on the host as
+-- relic_worker, verifies and admits it, or rejects it, and records which.
+-- The submission ID is the ID of the object it creates.
+CREATE TYPE submission_kind AS ENUM ('fidbf', 'bsim', 'provenance');
+CREATE TYPE submission_status AS ENUM ('pending', 'admitted', 'rejected');
+
+CREATE TABLE submission (
+    submission_id uuid PRIMARY KEY,
+    kind submission_kind NOT NULL,
+    analyst_id uuid NOT NULL REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    payload_json text NOT NULL CHECK (octet_length(payload_json) <= 8388608),
+    object_sha256 sha256_hex,
+    received_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    status submission_status NOT NULL DEFAULT 'pending',
+    attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    decided_at timestamptz,
+    result jsonb,
+    error text,
+    CHECK ((kind = 'fidbf') = (object_sha256 IS NOT NULL)),
+    CHECK ((status = 'pending') = (decided_at IS NULL)),
+    CHECK ((status = 'admitted') = (result IS NOT NULL)),
+    CHECK ((status = 'rejected') = (error IS NOT NULL))
+);
+
+COMMENT ON TABLE submission IS
+    'Signed FIDBF, BSim and provenance submissions staged by the API and admitted or rejected by relic-admit.';
+COMMENT ON COLUMN submission.payload_json IS
+    'The request body exactly as received; relic-admit parses and verifies it.';
+COMMENT ON COLUMN submission.object_sha256 IS
+    'FIDBF only: the staged object, uploaded before the manifest.';
+
+CREATE INDEX submission_pending_idx ON submission (received_at) WHERE status = 'pending';
+CREATE INDEX submission_analyst_idx ON submission (analyst_id, submission_id);
+CREATE INDEX submission_object_idx ON submission (object_sha256) WHERE status = 'pending';
+
+CREATE TRIGGER submission_requires_analyst
+BEFORE INSERT ON submission
+FOR EACH ROW EXECUTE FUNCTION require_actor_role('analyst_id', 'analyst');
+
+-- Only a pending submission changes, only its outcome, and only once.
+CREATE FUNCTION guard_submission()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Submissions are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.status <> 'pending' OR NEW.attempts <> 0 THEN
+            RAISE EXCEPTION 'A submission starts pending'
+                USING ERRCODE = 'check_violation';
+        END IF;
+        NEW.received_at := clock_timestamp();
+        RETURN NEW;
+    END IF;
+    IF OLD.status <> 'pending' THEN
+        RAISE EXCEPTION 'Submission % is already %', OLD.submission_id, OLD.status
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.submission_id <> OLD.submission_id
+       OR NEW.kind <> OLD.kind
+       OR NEW.analyst_id <> OLD.analyst_id
+       OR NEW.payload_json <> OLD.payload_json
+       OR NEW.object_sha256 IS DISTINCT FROM OLD.object_sha256
+       OR NEW.received_at <> OLD.received_at THEN
+        RAISE EXCEPTION 'A submission cannot be altered'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF NEW.status <> 'pending' THEN
+        NEW.decided_at := clock_timestamp();
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER submission_is_append_only
+BEFORE INSERT OR UPDATE OR DELETE ON submission
+FOR EACH ROW EXECUTE FUNCTION guard_submission();
+
+-- ---------------------------------------------------------------------------
+-- Two-Moderator approval for Moderator powers
+-- ---------------------------------------------------------------------------
+
+-- One Moderator alone could otherwise approve a new Moderator (including a
+-- second key of their own) and revoke the other Moderators (Moderators file
+-- account revocations, and may decide their own requests). Approving a Moderator registration and approving the
+-- revocation of a Moderator account therefore need two different, active
+-- Moderators: the first approval is stored here with its signature, the
+-- second is the final decision on the request row. Each Moderator signs the
+-- ordinary decision message (it names the Moderator and the verdict), so the
+-- approvals are re-verifiable like any decision. A single rejection is final.
+
+CREATE FUNCTION is_active_moderator(candidate_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM user_public
+         WHERE user_id = candidate_id
+           AND owner_type = 'human'
+           AND role = 'moderator'
+    ) AND NOT account_is_revoked(candidate_id);
+$$;
+
+CREATE TABLE registration_approval (
+    registration_request_id uuid NOT NULL
+        REFERENCES registration_request(registration_request_id) ON DELETE RESTRICT,
+    moderator_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    approval_signature bytea NOT NULL CHECK (octet_length(approval_signature) = 64),
+    approved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (registration_request_id, moderator_id)
+);
+
+COMMENT ON TABLE registration_approval IS
+    'First Moderator approval of a Moderator registration; the second Moderator decides the request.';
+
+CREATE TABLE revocation_approval (
+    revocation_id uuid NOT NULL
+        REFERENCES revocation(revocation_id) ON DELETE RESTRICT,
+    moderator_id uuid NOT NULL
+        REFERENCES user_public(user_id) ON DELETE RESTRICT,
+    approval_signature bytea NOT NULL CHECK (octet_length(approval_signature) = 64),
+    approved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (revocation_id, moderator_id)
+);
+
+COMMENT ON TABLE revocation_approval IS
+    'First Moderator approval of revoking a Moderator account; a second Moderator decides the request.';
+
+CREATE FUNCTION target_is_moderator(candidate_type corpus_target_type, candidate_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT candidate_type = 'user' AND EXISTS (
+        SELECT 1 FROM user_public WHERE user_id = candidate_id AND role = 'moderator'
+    );
+$$;
+
+CREATE FUNCTION guard_registration_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Approvals are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT is_active_moderator(NEW.moderator_id) THEN
+        RAISE EXCEPTION 'An approval requires an active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM registration_request
+         WHERE registration_request_id = NEW.registration_request_id
+           AND decision IS NULL
+           AND requested_role = 'moderator'
+    ) THEN
+        RAISE EXCEPTION 'Only a pending Moderator registration takes a first approval'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    NEW.approved_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER registration_approval_rules
+BEFORE INSERT OR UPDATE OR DELETE ON registration_approval
+FOR EACH ROW EXECUTE FUNCTION guard_registration_approval();
+
+CREATE FUNCTION guard_revocation_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'Approvals are permanent records'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT is_active_moderator(NEW.moderator_id) THEN
+        RAISE EXCEPTION 'An approval requires an active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM revocation
+         WHERE revocation_id = NEW.revocation_id
+           AND decision IS NULL
+           AND target_is_moderator(target_type, target_id)
+           AND target_id <> NEW.moderator_id
+    ) THEN
+        RAISE EXCEPTION 'Only a pending revocation of another Moderator takes a first approval'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    NEW.approved_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER revocation_approval_rules
+BEFORE INSERT OR UPDATE OR DELETE ON revocation_approval
+FOR EACH ROW EXECUTE FUNCTION guard_revocation_approval();
+
+-- Also applies through decide_registration(), which runs as relic_owner:
+-- there is no operator exception for registrations (the operator creates
+-- Moderators directly, see local-dev.sh bootstrap-moderator).
+CREATE FUNCTION require_second_registration_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF OLD.decision IS NULL
+       AND NEW.decision = 'approved'
+       AND NEW.requested_role = 'moderator'
+       AND NOT EXISTS (
+           SELECT 1 FROM registration_approval
+            WHERE registration_request_id = NEW.registration_request_id
+              AND moderator_id <> NEW.moderator_id
+              AND is_active_moderator(moderator_id)
+       ) THEN
+        RAISE EXCEPTION 'Approving a Moderator needs a prior approval by another active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER registration_moderator_needs_two
+BEFORE UPDATE ON registration_request
+FOR EACH ROW EXECUTE FUNCTION require_second_registration_approval();
+
+-- The database operator may still decide alone (e.g. with only two
+-- Moderators, one of them the target), as for system accounts.
+CREATE FUNCTION require_second_revocation_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF OLD.decision IS NULL
+       AND NEW.decision = 'approved'
+       AND target_is_moderator(NEW.target_type, NEW.target_id)
+       AND NOT is_database_operator()
+       AND NOT EXISTS (
+           SELECT 1 FROM revocation_approval
+            WHERE revocation_id = NEW.revocation_id
+              AND moderator_id <> NEW.moderator_id
+              AND moderator_id <> NEW.target_id
+              AND is_active_moderator(moderator_id)
+       ) THEN
+        RAISE EXCEPTION 'Revoking a Moderator needs a prior approval by another active Moderator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER revocation_moderator_needs_two
+BEFORE UPDATE ON revocation
+FOR EACH ROW EXECUTE FUNCTION require_second_revocation_approval();
+
+-- ---------------------------------------------------------------------------
+-- Flags and flag responses
+-- ---------------------------------------------------------------------------
+
+-- A flag response becomes a target, so an abusive response can be flagged
+-- and revoked like any other object. A new enum value can only be used after
+-- the transaction that adds it commits; nothing in this migration uses it.
+ALTER TYPE corpus_target_type ADD VALUE IF NOT EXISTS 'flag_response';
+
+-- Replaces the schema v1 version: adds flag_response.
+CREATE OR REPLACE FUNCTION target_exists(
+    candidate_type corpus_target_type,
+    candidate_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    RETURN CASE candidate_type
+        WHEN 'user' THEN EXISTS (
+            SELECT 1 FROM user_public WHERE user_id = candidate_id
+        )
+        WHEN 'source' THEN EXISTS (
+            SELECT 1 FROM source WHERE source_id = candidate_id
+        )
+        WHEN 'batch' THEN EXISTS (
+            SELECT 1 FROM batch WHERE batch_id = candidate_id
+        )
+        WHEN 'binary' THEN EXISTS (
+            SELECT 1 FROM binary_record WHERE binary_id = candidate_id
+        )
+        WHEN 'function' THEN EXISTS (
+            SELECT 1 FROM function_record WHERE function_id = candidate_id
+        )
+        WHEN 'fidbf' THEN EXISTS (
+            SELECT 1 FROM fidbf WHERE fidbf_id = candidate_id
+        )
+        WHEN 'bsim' THEN EXISTS (
+            SELECT 1 FROM bsim WHERE bsim_id = candidate_id
+        )
+        WHEN 'provenance' THEN EXISTS (
+            SELECT 1 FROM provenance WHERE provenance_id = candidate_id
+        )
+        WHEN 'license_assertion' THEN EXISTS (
+            SELECT 1 FROM license_assertion
+             WHERE license_assertion_id = candidate_id
+        )
+        WHEN 'software_component' THEN EXISTS (
+            SELECT 1 FROM software_component WHERE component_id = candidate_id
+        )
+        WHEN 'software_release' THEN EXISTS (
+            SELECT 1 FROM software_release
+             WHERE software_release_id = candidate_id
+        )
+        WHEN 'binary_component_assertion' THEN EXISTS (
+            SELECT 1 FROM binary_component_assertion
+             WHERE binary_component_assertion_id = candidate_id
+        )
+        WHEN 'behavioural_composition' THEN EXISTS (
+            SELECT 1 FROM behavioural_composition
+             WHERE behavioural_composition_id = candidate_id
+        )
+        WHEN 'classification' THEN EXISTS (
+            SELECT 1 FROM classification WHERE classification_id = candidate_id
+        )
+        WHEN 'flag' THEN EXISTS (
+            SELECT 1 FROM flag WHERE flag_id = candidate_id
+        )
+        WHEN 'flag_response' THEN EXISTS (
+            SELECT 1 FROM flag_response WHERE flag_response_id = candidate_id
+        )
+    END;
+END;
+$$;
+
+ALTER TABLE flag
+    ADD CONSTRAINT flag_signature_ed25519 CHECK (octet_length(signature) = 64);
+ALTER TABLE flag_response
+    ADD CONSTRAINT flag_response_signature_ed25519 CHECK (octet_length(signature) = 64);
+
+-- One flag per Viewer per target; follow-ups belong in responses or a
+-- revocation request. The API reports a second flag as 409.
+CREATE UNIQUE INDEX flag_one_per_viewer_target_idx
+    ON flag (viewer_request_id, target_type, target_id);
+
+CREATE FUNCTION target_is_revoked(
+    candidate_type corpus_target_type,
+    candidate_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = catalogue, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM revocation
+         WHERE target_type = candidate_type
+           AND target_id = candidate_id
+           AND decision = 'approved'
+    );
+$$;
+
+-- A revoked target or flag leaves nothing to act on, so it takes no new flags
+-- or responses. created_at comes from the database clock, never the client.
+CREATE FUNCTION guard_flag()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked(NEW.target_type, NEW.target_id) THEN
+        RAISE EXCEPTION 'Target %.% is revoked', NEW.target_type, NEW.target_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_flag_response()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = catalogue, pg_temp
+AS $$
+BEGIN
+    IF target_is_revoked('flag', NEW.flag_id) THEN
+        RAISE EXCEPTION 'Flag % is revoked', NEW.flag_id
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    NEW.created_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+-- Named to fire after the role and existence checks (triggers run in name order).
+CREATE TRIGGER flag_target_not_revoked
+BEFORE INSERT ON flag
+FOR EACH ROW EXECUTE FUNCTION guard_flag();
+
+CREATE TRIGGER flag_response_target_not_revoked
+BEFORE INSERT ON flag_response
+FOR EACH ROW EXECUTE FUNCTION guard_flag_response();
+
+-- ---------------------------------------------------------------------------
+-- Analyst-only corpus objects
+-- ---------------------------------------------------------------------------
+
+DROP TRIGGER fidbf_requires_active_submitter ON fidbf;
+DROP TRIGGER bsim_requires_active_submitter ON bsim;
+DROP TRIGGER provenance_requires_active_submitter ON provenance;
+
+CREATE TRIGGER fidbf_requires_analyst
+BEFORE INSERT OR UPDATE ON fidbf
+FOR EACH ROW EXECUTE FUNCTION require_actor_role('submitted_by_user_id', 'analyst');
+
+CREATE TRIGGER bsim_requires_analyst
+BEFORE INSERT OR UPDATE ON bsim
+FOR EACH ROW EXECUTE FUNCTION require_actor_role('submitted_by_user_id', 'analyst');
+
+CREATE TRIGGER provenance_requires_analyst
+BEFORE INSERT OR UPDATE ON provenance
+FOR EACH ROW EXECUTE FUNCTION require_actor_role('submitted_by_user_id', 'analyst');
+
+-- ---------------------------------------------------------------------------
+-- Catalogue read paging
+-- ---------------------------------------------------------------------------
+
+-- Filtered lists run WHERE <filter> = $1 AND <pk> > $cursor ORDER BY <pk>.
+-- With an index on <filter> alone, PostgreSQL either sorts every matching row
+-- for each page or walks the primary key and skips non-matching rows, which
+-- can read most of the table. An index on (<filter>, <pk>) serves each page
+-- as one range scan. It still serves foreign-key and equality lookups on
+-- <filter>, so it replaces the single-column index under the same name.
+-- Near-unique hash filters (sha256, md5) keep their single-column indexes.
+
+DROP INDEX binary_batch_id_idx;
+CREATE INDEX binary_batch_id_idx ON binary_record (batch_id, binary_id);
+DROP INDEX binary_source_id_idx;
+CREATE INDEX binary_source_id_idx ON binary_record (source_id, binary_id);
+
+DROP INDEX fidbf_binary_id_idx;
+CREATE INDEX fidbf_binary_id_idx ON fidbf (binary_id, fidbf_id);
+DROP INDEX fidbf_source_id_idx;
+CREATE INDEX fidbf_source_id_idx ON fidbf (source_id, fidbf_id);
+
+DROP INDEX function_binary_id_idx;
+CREATE INDEX function_binary_id_idx ON function_record (binary_id, function_id);
+DROP INDEX function_fidbf_id_idx;
+CREATE INDEX function_fidbf_id_idx ON function_record (fidbf_id, function_id);
+
+DROP INDEX bsim_source_id_idx;
+CREATE INDEX bsim_source_id_idx ON bsim (source_id, bsim_id);
+
+-- function_id lookups use UNIQUE (function_id, bsim_id); a function has few links.
+DROP INDEX function_bsim_binary_id_idx;
+CREATE INDEX function_bsim_binary_id_idx ON function_bsim (binary_id, function_bsim_id);
+DROP INDEX function_bsim_bsim_id_idx;
+CREATE INDEX function_bsim_bsim_id_idx ON function_bsim (bsim_id, function_bsim_id);
+
+DROP INDEX provenance_source_id_idx;
+CREATE INDEX provenance_source_id_idx ON provenance (source_id, provenance_id);
+DROP INDEX provenance_fidbf_id_idx;
+CREATE INDEX provenance_fidbf_id_idx ON provenance (fidbf_id, provenance_id);
+DROP INDEX provenance_bsim_id_idx;
+CREATE INDEX provenance_bsim_id_idx ON provenance (bsim_id, provenance_id);
+DROP INDEX provenance_binary_id_idx;
+CREATE INDEX provenance_binary_id_idx ON provenance (binary_id, provenance_id);
+
+DROP INDEX license_assertion_source_id_idx;
+CREATE INDEX license_assertion_source_id_idx
+    ON license_assertion (source_id, license_assertion_id)
+    WHERE source_id IS NOT NULL;
+DROP INDEX license_assertion_binary_id_idx;
+CREATE INDEX license_assertion_binary_id_idx
+    ON license_assertion (binary_id, license_assertion_id)
+    WHERE binary_id IS NOT NULL;
+
+DROP INDEX classification_target_idx;
+CREATE INDEX classification_target_idx
+    ON classification (target_type, target_id, classification_id);
+
+DROP INDEX flag_target_idx;
+CREATE INDEX flag_target_idx ON flag (target_type, target_id, flag_id);
+DROP INDEX flag_response_flag_id_idx;
+CREATE INDEX flag_response_flag_id_idx ON flag_response (flag_id, flag_response_id);
+
+DROP INDEX software_release_component_idx;
+CREATE INDEX software_release_component_idx
+    ON software_release (component_id, software_release_id);
+DROP INDEX software_release_source_idx;
+CREATE INDEX software_release_source_idx
+    ON software_release (source_id, software_release_id)
+    WHERE source_id IS NOT NULL;
+CREATE INDEX software_component_purl_idx
+    ON software_component (purl, component_id)
+    WHERE purl IS NOT NULL;
+DROP INDEX binary_component_assertion_binary_idx;
+CREATE INDEX binary_component_assertion_binary_idx
+    ON binary_component_assertion (binary_id, binary_component_assertion_id);
+DROP INDEX binary_component_assertion_release_idx;
+CREATE INDEX binary_component_assertion_release_idx
+    ON binary_component_assertion (software_release_id, binary_component_assertion_id);
+
+DROP INDEX integrity_source_id_idx;
+CREATE INDEX integrity_source_id_idx ON integrity (source_id, integrity_id);
+
+-- ---------------------------------------------------------------------------
+-- Signed evidence: Ed25519 signatures only
+-- ---------------------------------------------------------------------------
+
+-- Schema v1 only required these to be non-empty. Every signature RELIC stores
+-- is a 64-byte Ed25519 signature; anything else is malformed.
+ALTER TABLE source ADD CONSTRAINT source_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE batch ADD CONSTRAINT batch_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE fidbf ADD CONSTRAINT fidbf_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE bsim ADD CONSTRAINT bsim_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE provenance ADD CONSTRAINT provenance_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE license_assertion ADD CONSTRAINT license_assertion_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE binary_component_assertion ADD CONSTRAINT binary_component_assertion_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE behavioural_composition ADD CONSTRAINT behavioural_composition_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE classification ADD CONSTRAINT classification_signature_ed25519
+    CHECK (octet_length(signature) = 64);
+ALTER TABLE integrity ADD CONSTRAINT integrity_system_signature_ed25519
+    CHECK (octet_length(system_signature) = 64);
+ALTER TABLE mmr_checkpoint ADD CONSTRAINT mmr_checkpoint_system_signature_ed25519
+    CHECK (octet_length(system_signature) = 64);
+
+-- ---------------------------------------------------------------------------
+-- Application privileges
+-- ---------------------------------------------------------------------------
+
+-- Signed evidence is append-only for the application.
+REVOKE UPDATE ON
+    source,
+    batch,
+    binary_record,
+    fidbf,
+    function_record,
+    bsim,
+    function_bsim,
+    provenance,
+    classification,
+    flag,
+    flag_response,
+    integrity
+FROM relic_app;
+
+-- Identities are created only through decide_registration(), which runs as
+-- relic_owner. Contact details reach Moderators through registration_request;
+-- no route reads or writes user_private, so a compromised API cannot dump or
+-- rewrite them.
+REVOKE INSERT, UPDATE ON user_public FROM relic_app;
+REVOKE SELECT, INSERT, UPDATE ON user_private FROM relic_app;
+
+GRANT SELECT, INSERT, UPDATE ON auth_challenge TO relic_app;
+GRANT SELECT, INSERT ON registration_request TO relic_app;
+GRANT SELECT, INSERT ON registration_approval, revocation_approval TO relic_app;
+REVOKE UPDATE, DELETE ON registration_approval, revocation_approval FROM relic_app;
+REVOKE UPDATE, DELETE ON registration_request FROM relic_app;
+
+REVOKE EXECUTE ON FUNCTION decide_registration(uuid, uuid, registration_decision, bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION purge_expired_auth_challenges() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION decide_registration(uuid, uuid, registration_decision, bytea) TO relic_app;
+GRANT EXECUTE ON FUNCTION purge_expired_auth_challenges() TO relic_app;
+
+-- ---------------------------------------------------------------------------
+-- Database logins
+-- ---------------------------------------------------------------------------
+--
+-- relic_owner   NOLOGIN. Owns the schema; migrations and operator actions
+--               (first Moderator, system accounts, revoking a system
+--               account) run as it.
+-- relic_app     The API. Never signs: it verifies user signatures and
+--               stores user-signed rows.
+-- relic_worker  The integrity, MMR and FIDBF-admission workers. The only
+--               login that appends to the integrity chain and MMR
+--               checkpoints, which carry system signatures made with keys
+--               the API never holds.
+-- relic_auditor relic-verify (e.g. from cron). Reads everything it
+--               re-verifies, writes nothing, and never sees user_private.
+--
+-- The database checks who a system row names, not its signature, so a
+-- compromised API could otherwise append forged entries in a system
+-- account's name to a chain that can never be edited.
+
+REVOKE INSERT ON integrity, mmr_checkpoint FROM relic_app;
+
+-- relic_app inserts only what its routes write: challenges, registration
+-- requests, revocations, first approvals, flags and flag responses. Each
+-- submission route grants its own table when it is implemented, so a
+-- compromised API cannot write rows no route needs (some of which have no
+-- signed format relic-verify could check yet), and new tables are not
+-- writable by the API unless a migration says so.
+REVOKE INSERT ON
+    source, batch, binary_record, fidbf, function_record, bsim, function_bsim,
+    provenance, license_assertion, software_component, software_release,
+    binary_component_assertion, behavioural_composition, composition_member,
+    classification
+FROM relic_app;
+
+-- POST /v1/license-assertions and POST /v1/classifications.
+GRANT INSERT ON license_assertion, classification TO relic_app;
+
+-- PUT /v1/fidbf-objects and POST /v1/fidbf, /v1/bsim, /v1/provenance stage
+-- submissions; reading their status is the submitter's.
+GRANT SELECT, INSERT ON submission TO relic_app;
+
+-- POST /v1/software-components, /v1/software-releases,
+-- /v1/binary-component-assertions and /v1/behavioural-compositions.
+GRANT INSERT ON
+    software_component, software_release, binary_component_assertion,
+    behavioural_composition, composition_member
+TO relic_app;
+
+GRANT USAGE ON SCHEMA catalogue TO relic_worker;
+
+-- Row triggers run with the caller's privileges, so admission must be able to
+-- read what they check. Contact details, registration requests and login
+-- challenges are not catalogue data and stay out of reach.
+GRANT SELECT ON
+    source, batch, binary_record, fidbf, function_record, bsim, function_bsim,
+    provenance, license_assertion, software_component, software_release,
+    binary_component_assertion, behavioural_composition, composition_member,
+    classification, flag, flag_response, revocation, user_public,
+    integrity, mmr_checkpoint
+TO relic_worker;
+
+-- relic-admit (and relic-ingest-fidbf) admit a source, batch, binary, FIDBF
+-- and functions with one integrity entry, and BSim objects (with their
+-- function links) and provenance seals each with one; relic-chain-bsim
+-- appends integrity entries; relic-checkpoint-mmr appends checkpoints.
+-- Append-only: no UPDATE or DELETE.
+GRANT INSERT ON
+    source, batch, binary_record, fidbf, function_record, integrity, mmr_checkpoint,
+    bsim, function_bsim, provenance
+TO relic_worker;
+
+-- relic-admit takes staged submissions and records their outcome; it never
+-- changes what was submitted (guard_submission() enforces that too).
+GRANT SELECT ON submission TO relic_worker;
+GRANT UPDATE (status, attempts, decided_at, result, error) ON submission TO relic_worker;
+
+-- Registration proofs are signed over their challenge and decisions over the
+-- request's contact details, so the auditor reads those tables too.
+GRANT USAGE ON SCHEMA catalogue TO relic_auditor;
+GRANT SELECT ON ALL TABLES IN SCHEMA catalogue TO relic_auditor;
+REVOKE SELECT ON user_private FROM relic_auditor;
+
+RESET ROLE;
+
+COMMIT;

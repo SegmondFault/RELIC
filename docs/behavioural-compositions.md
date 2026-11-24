@@ -19,14 +19,20 @@ itself executable behaviour.
 
 `member_role` records why a member matters, for example `loader`, `decoder`,
 `payload`, `persistence` or `c2`. `sequence_number` starts at zero when order is
-asserted and remains `NULL` for an unordered set.
+asserted and remains `NULL` for an unordered set. Each position is used at most
+once in a composition.
 
 ## Admission and correction
 
-The API must create the composition, all members and its classification in one
-transaction, in that order. Once a composition has been classified, the
-database rejects additional members. Composition metadata and existing
-membership rows are immutable.
+`POST /v1/behavioural-compositions` writes the composition and all its members
+in one transaction. The Analyst signs the composition together with every
+member (format in [`authentication.md`](authentication.md#behavioural-composition)),
+and the row states its `member_count`: the database refuses a member beyond
+that count and, when the transaction commits, a composition with fewer. A
+committed composition can therefore never gain or lose a member, and the
+stored membership is always the signed one (`relic-verify` re-checks it).
+It is then classified like any other target, through `POST
+/v1/classifications`. Composition metadata and membership rows are immutable.
 
 A correction or changed member set creates a new composition and signed
 classification; the analyst then uses the ordinary revocation workflow for the

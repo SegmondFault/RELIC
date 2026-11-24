@@ -3,4 +3,6 @@ psycopg[binary]==3.3.9
 psycopg_pool==3.3.3
 pydantic==2.14.3
 pydantic_settings==2.16.2
+PyJWT==2.15.1
+PyNaCl==1.6.2
 uvicorn[standard]==0.38.0

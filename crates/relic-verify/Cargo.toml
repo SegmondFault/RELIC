@@ -1,0 +1,28 @@
+[package]
+name = "relic-verify"
+version = "0.1.0"
+description = "Read-only re-verification of every signature and the integrity chain in a RELIC database"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "relic-verify"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+relic-crypto = { path = "../relic-crypto" }
+relic-domain = { path = "../relic-domain" }
+relic-ingest = { path = "../relic-ingest" }
+relic-integrity-worker = { path = "../relic-integrity-worker" }
+relic-mmr-worker = { path = "../relic-mmr-worker" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.18", features = ["serde"] }
+
+[lints]
+workspace = true

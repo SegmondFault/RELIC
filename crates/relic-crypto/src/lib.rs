@@ -18,6 +18,8 @@ use ssh_key::PrivateKey;
 use thiserror::Error as ThisError;
 use zeroize::Zeroizing;
 
+pub mod auth;
+
 /// A SHA-256 digest.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Digest32([u8; 32]);
@@ -280,7 +282,14 @@ pub fn verify_digest_signature(
     key.verify_strict(&signing_message(domain, digest), &signature)
 }
 
-fn signing_message(domain: &[u8], digest: &Digest32) -> Vec<u8> {
+/// Exact bytes passed to Ed25519: `u64_be(len(domain)) || domain || digest`.
+///
+/// # Panics
+///
+/// Only if the domain length does not fit in a `u64`, which cannot happen on
+/// supported targets.
+#[must_use]
+pub fn signing_message(domain: &[u8], digest: &Digest32) -> Vec<u8> {
     let domain_length = u64::try_from(domain.len()).expect("domain length exceeds u64");
     let mut message = Vec::with_capacity(8 + domain.len() + 32);
     message.extend_from_slice(&domain_length.to_be_bytes());

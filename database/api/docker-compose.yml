@@ -6,6 +6,27 @@ services:
     restart: unless-stopped
     expose:
       - "8000"
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    # PostgreSQL runs on the host and listens on 127.0.0.1 only. The API
+    # reaches it through its Unix socket, so no database port is exposed to
+    # any network. Read-only: connecting to a socket needs no write access.
+    volumes:
+      - ${RELIC_PG_SOCKET_DIR:-/var/run/postgresql}:/var/run/postgresql:ro
+      # Uploaded FIDBF objects wait here for relic-admit (host, relic_worker).
+      # The only writable mount: the API never writes the object store.
+      - ${RELIC_STAGING_DIR:-/var/lib/relic/staging}:/var/lib/relic/staging
+      # Admitted FIDBF objects, served by GET /v1/fidbf/{id}/download.
+      - ${RELIC_FIDBF_ROOT:-/srv/relic-objects}:/srv/relic-objects:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
@@ -16,14 +37,36 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    networks:
+      - internal
+      - public
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 256m
     environment:
       RELIC_HOST: ${RELIC_HOST:?RELIC_HOST must be set to the public IP or domain}
       ACME_CA: ${ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
       ACME_PROFILE: ${ACME_PROFILE:-shortlived}
+      RELIC_READ_BODY_TIMEOUT: ${RELIC_READ_BODY_TIMEOUT:-5m}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+networks:
+  # Caddy <-> API only. No route out: the API needs nothing beyond Caddy and
+  # the database socket, so a compromised API cannot reach the internet.
+  internal:
+    internal: true
+  public:
 
 volumes:
   caddy_data:

@@ -13,7 +13,7 @@ RUN pip install -r requirements.txt
 COPY *.py ./api/
 COPY routers/*.py ./api/routers/
 
-RUN useradd --system --uid 10001 relic
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin relic
 USER relic
 
 EXPOSE 8000
@@ -21,4 +21,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "--factory", "api.main:create_app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--no-date-header", "--proxy-headers", "--forwarded-allow-ips", "*", "--timeout-keep-alive", "5", "--limit-concurrency", "200"]

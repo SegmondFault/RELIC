@@ -19,23 +19,23 @@ BEGIN
     BEGIN
         INSERT INTO user_public (user_id, public_key, role, owner_type)
         VALUES
-            (analyst_id, '\x01', 'analyst', 'human'),
-            (system_id, '\x02', NULL, 'system');
+            (analyst_id, decode(repeat('01', 32), 'hex'), 'analyst', 'human'),
+            (system_id, decode(repeat('02', 32), 'hex'), NULL, 'system');
 
         INSERT INTO source (
             source_id, name, source_type, retrieved_at,
             submitted_by_analyst_id, signature
         ) VALUES (
             source_id_value, 'atomic-rollback-source', 'BSIM', clock_timestamp(),
-            analyst_id, '\x03'
+            analyst_id, decode(repeat('03', 64), 'hex')
         );
 
         INSERT INTO bsim (
-            bsim_id, object_data, sha256, md5, submitted_by_user_id,
+            bsim_id, object_data, object_json, sha256, md5, submitted_by_user_id,
             signature, source_id
         ) VALUES (
-            bsim_id_value, '{"value":1}', repeat('a', 64), repeat('b', 32),
-            analyst_id, '\x04', source_id_value
+            bsim_id_value, '{"value":1}', '{"value":1}', encode(sha256(convert_to('{"value":1}', 'UTF8')), 'hex'), md5('{"value":1}'),
+            analyst_id, decode(repeat('04', 64), 'hex'), source_id_value
         );
 
         -- The trigger must reject this mismatch and the surrounding
@@ -45,7 +45,7 @@ BEGIN
             format_version, system_signature, system_uid
         ) VALUES (
             source_id_value, 'FIDBF', repeat('c', 64), NULL, repeat('d', 64),
-            1, '\x05', system_id
+            1, decode(repeat('05', 64), 'hex'), system_id
         );
     EXCEPTION
         WHEN check_violation THEN
@@ -74,15 +74,15 @@ DECLARE
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
     VALUES
-        (analyst_id, '\x31', 'analyst', 'human'),
-        (viewer_id, '\x32', 'viewer', 'human');
+        (analyst_id, decode(repeat('31', 32), 'hex'), 'analyst', 'human'),
+        (viewer_id, decode(repeat('32', 32), 'hex'), 'viewer', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,
         submitted_by_analyst_id, signature
     ) VALUES (
         source_id_value, 'licensing-source', 'source archive',
-        clock_timestamp(), analyst_id, '\x33'
+        clock_timestamp(), analyst_id, decode(repeat('33', 64), 'hex')
     );
 
     INSERT INTO license_assertion (
@@ -90,7 +90,7 @@ BEGIN
         submitted_by_analyst_id, signature
     ) VALUES (
         assertion_id, source_id_value, 'MIT OR Apache-2.0', 'declared',
-        analyst_id, '\x34'
+        analyst_id, decode(repeat('34', 64), 'hex')
     );
 
     IF NOT target_exists('license_assertion', assertion_id) THEN
@@ -117,7 +117,7 @@ BEGIN
             submitted_by_analyst_id, signature
         ) VALUES (
             source_id_value, gen_random_uuid(), 'MIT', 'detected',
-            analyst_id, '\x35'
+            analyst_id, decode(repeat('35', 64), 'hex')
         );
     EXCEPTION
         WHEN check_violation OR foreign_key_violation THEN
@@ -134,7 +134,7 @@ BEGIN
             submitted_by_analyst_id, signature
         ) VALUES (
             source_id_value, 'NOASSERTION', 'analyst_assessed',
-            viewer_id, '\x36'
+            viewer_id, decode(repeat('36', 64), 'hex')
         );
     EXCEPTION
         WHEN insufficient_privilege THEN
@@ -164,22 +164,22 @@ DECLARE
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
     VALUES
-        (analyst_id, '\x11', 'analyst', 'human'),
-        (integrity_system_id, '\x12', NULL, 'system'),
-        (mmr_system_id, '\x13', NULL, 'system');
+        (analyst_id, decode(repeat('11', 32), 'hex'), 'analyst', 'human'),
+        (integrity_system_id, decode(repeat('12', 32), 'hex'), NULL, 'system'),
+        (mmr_system_id, decode(repeat('13', 32), 'hex'), NULL, 'system');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,
         submitted_by_analyst_id, signature
     ) VALUES (
         source_id_value, 'valid-membership-source', 'BSIM', clock_timestamp(),
-        analyst_id, '\x14'
+        analyst_id, decode(repeat('14', 64), 'hex')
     );
 
     INSERT INTO batch (
         batch_id, md5, content_sha256, analyst_user_id, signature
     ) VALUES (
-        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, '\x15'
+        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, decode(repeat('15', 64), 'hex')
     );
 
     INSERT INTO binary_record (
@@ -197,11 +197,11 @@ BEGIN
         (second_function_id, binary_id_value, 'full-2', 'specific-2');
 
     INSERT INTO bsim (
-        bsim_id, object_data, sha256, md5, submitted_by_user_id,
+        bsim_id, object_data, object_json, sha256, md5, submitted_by_user_id,
         signature, source_id
     ) VALUES (
-        bsim_id_value, '{"value":2}', repeat('5', 64), repeat('6', 32),
-        analyst_id, '\x16', source_id_value
+        bsim_id_value, '{"value":2}', '{"value":2}', encode(sha256(convert_to('{"value":2}', 'UTF8')), 'hex'), md5('{"value":2}'),
+        analyst_id, decode(repeat('16', 64), 'hex'), source_id_value
     );
 
     INSERT INTO function_bsim (function_id, binary_id, bsim_id)
@@ -218,7 +218,7 @@ BEGIN
         format_version, system_signature, system_uid
     ) VALUES (
         source_id_value, 'BSIM', repeat('7', 64), NULL, repeat('8', 64),
-        1, '\x17', integrity_system_id
+        1, decode(repeat('17', 64), 'hex'), integrity_system_id
     ) RETURNING integrity_id INTO first_integrity_id;
 
     INSERT INTO integrity (
@@ -226,7 +226,7 @@ BEGIN
         format_version, system_signature, system_uid
     ) VALUES (
         source_id_value, 'BSIM', repeat('9', 64), repeat('8', 64), repeat('a', 64),
-        1, '\x18', integrity_system_id
+        1, decode(repeat('18', 64), 'hex'), integrity_system_id
     ) RETURNING integrity_id INTO second_integrity_id;
 
     rejected := false;
@@ -236,7 +236,7 @@ BEGIN
             system_uid, system_signature
         ) VALUES (
             second_integrity_id, 1, '[{"height":1}]', repeat('b', 64), 1,
-            mmr_system_id, '\x19'
+            mmr_system_id, decode(repeat('19', 64), 'hex')
         );
     EXCEPTION
         WHEN check_violation THEN
@@ -251,7 +251,7 @@ BEGIN
         system_uid, system_signature
     ) VALUES (
         second_integrity_id, 2, '[{"height":1}]', repeat('c', 64), 1,
-        mmr_system_id, '\x20'
+        mmr_system_id, decode(repeat('20', 64), 'hex')
     ) RETURNING mmr_checkpoint_id INTO checkpoint_id;
 
     rejected := false;
@@ -285,19 +285,19 @@ DECLARE
     rejected boolean;
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
-    VALUES (analyst_id, '\x41', 'analyst', 'human');
+    VALUES (analyst_id, decode(repeat('41', 32), 'hex'), 'analyst', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at, is_ecological,
         submitted_by_analyst_id, signature
     ) VALUES (
         source_id_value, 'component-test', 'BSIM', clock_timestamp(), false,
-        analyst_id, '\x42'
+        analyst_id, decode(repeat('42', 64), 'hex')
     );
     INSERT INTO batch (
         batch_id, md5, content_sha256, analyst_user_id, signature
     ) VALUES (
-        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, '\x43'
+        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, decode(repeat('43', 64), 'hex')
     );
     INSERT INTO binary_record (
         binary_id, batch_id, content_sha256, content_md5, size_bytes,
@@ -308,25 +308,27 @@ BEGIN
     );
 
     INSERT INTO provenance (
-        provenance_id, binary_id, schema_name, schema_version, object_data,
+        provenance_id, binary_id, schema_name, schema_version, object_data, object_json,
         sha256, md5, submitted_by_user_id, signature, source_id
     ) VALUES (
         provenance_id_value, binary_id_value, 'ocsf', '1.9.0',
         '{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}',
-        repeat('5', 64), repeat('6', 32), analyst_id, '\x44', source_id_value
+        '{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}',
+        encode(sha256(convert_to('{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}', 'UTF8')), 'hex'), md5('{"class_uid":5020,"category_uid":5,"activity_id":2,"type_uid":502002,"time":1,"severity_id":1,"metadata":{"version":"1.9.0","product":{"name":"RELIC"}},"unmapped":{"relic":{"schema_version":"relic.provenance/1.0"}}}'), analyst_id, decode(repeat('44', 64), 'hex'), source_id_value
     );
 
     INSERT INTO software_component (
-        component_id, name, component_kind, purl, created_by_analyst_id
+        component_id, name, component_kind, purl, created_by_analyst_id, signature
     ) VALUES (
         component_id_value, 'libexample', 'library',
-        'pkg:generic/libexample@1.0', analyst_id
+        'pkg:generic/libexample@1.0', analyst_id, decode(repeat('47', 64), 'hex')
     );
     INSERT INTO software_release (
         software_release_id, component_id, version, source_id,
-        created_by_analyst_id
+        created_by_analyst_id, signature
     ) VALUES (
-        release_id_value, component_id_value, '1.0', source_id_value, analyst_id
+        release_id_value, component_id_value, '1.0', source_id_value, analyst_id,
+        decode(repeat('48', 64), 'hex')
     );
     INSERT INTO binary_component_assertion (
         binary_component_assertion_id, binary_id, software_release_id,
@@ -335,7 +337,7 @@ BEGIN
     ) VALUES (
         assertion_id_value, binary_id_value, release_id_value,
         'statically_contains', 'detected', 0.8750, provenance_id_value,
-        analyst_id, '\x45'
+        analyst_id, decode(repeat('45', 64), 'hex')
     );
 
     IF NOT target_exists('binary_component_assertion', assertion_id_value) THEN
@@ -361,7 +363,7 @@ BEGIN
             submitted_by_user_id, signature, source_id
         ) VALUES (
             binary_id_value, 'ocsf', '1.9.0', repeat('7', 64), repeat('8', 32),
-            analyst_id, '\x46', source_id_value
+            analyst_id, decode(repeat('46', 64), 'hex'), source_id_value
         );
     EXCEPTION
         WHEN check_violation THEN rejected := true;
@@ -383,19 +385,19 @@ DECLARE
     rejected boolean;
 BEGIN
     INSERT INTO user_public (user_id, public_key, role, owner_type)
-    VALUES (analyst_id, '\x51', 'analyst', 'human');
+    VALUES (analyst_id, decode(repeat('51', 32), 'hex'), 'analyst', 'human');
 
     INSERT INTO source (
         source_id, name, source_type, retrieved_at,
         submitted_by_analyst_id, signature
     ) VALUES (
         source_id_value, 'composition-test', 'analysis', clock_timestamp(),
-        analyst_id, '\x52'
+        analyst_id, decode(repeat('52', 64), 'hex')
     );
     INSERT INTO batch (
         batch_id, md5, content_sha256, analyst_user_id, signature
     ) VALUES (
-        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, '\x53'
+        batch_id_value, repeat('1', 32), repeat('2', 64), analyst_id, decode(repeat('53', 64), 'hex')
     );
     INSERT INTO binary_record (
         binary_id, batch_id, content_sha256, content_md5, size_bytes,
@@ -413,11 +415,11 @@ BEGIN
 
     INSERT INTO behavioural_composition (
         behavioural_composition_id, name, description,
-        submitted_by_analyst_id, signature
+        submitted_by_analyst_id, signature, member_count
     ) VALUES (
         composition_id_value, 'staged execution chain',
         'Neutral members whose ordered combination is classified separately',
-        analyst_id, '\x54'
+        analyst_id, decode(repeat('54', 64), 'hex'), 2
     );
     INSERT INTO composition_member (
         behavioural_composition_id, target_type, target_id,
@@ -428,10 +430,11 @@ BEGIN
 
     INSERT INTO classification (
         target_type, target_id, label, confidence, analyst_id,
-        evidence, signature
+        evidence, evidence_json, signature
     ) VALUES (
         'behavioural_composition', composition_id_value, 'malicious', 0.9000,
-        analyst_id, '{"reason":"combined execution behaviour"}', '\x55'
+        analyst_id, '{"reason":"combined execution behaviour"}',
+        '{"reason":"combined execution behaviour"}', decode(repeat('55', 64), 'hex')
     );
 
     IF NOT target_exists('behavioural_composition', composition_id_value) THEN
@@ -478,7 +481,7 @@ BEGIN
             target_type, target_id, label, analyst_id, signature
         ) VALUES (
             'behavioural_composition', gen_random_uuid(), 'malicious',
-            analyst_id, '\x56'
+            analyst_id, decode(repeat('56', 64), 'hex')
         );
     EXCEPTION
         WHEN foreign_key_violation THEN rejected := true;

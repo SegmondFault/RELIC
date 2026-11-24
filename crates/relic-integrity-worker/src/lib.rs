@@ -14,6 +14,7 @@ use uuid::Uuid;
 const CHAIN_HASH_DOMAIN: &[u8] = b"RELIC:integrity-chain-hash:v1";
 const SIGNATURE_DOMAIN: &[u8] = b"RELIC:integrity-system-signature:v1";
 const BSIM_RECORD_DOMAIN: &[u8] = b"RELIC:bsim-record:v1";
+const PROVENANCE_RECORD_DOMAIN: &[u8] = b"RELIC:provenance-record:v1";
 
 /// Unsigned, canonical fields committed by an integrity-chain entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +57,66 @@ impl IntegrityEnvelope {
             ],
         )
     }
+}
+
+/// The stored `BSim` fields an integrity entry commits to.
+#[derive(Clone, Copy, Debug)]
+pub struct BsimRecord<'a> {
+    pub bsim_id: Uuid,
+    pub source_id: Uuid,
+    /// Lowercase hex, exactly as stored.
+    pub sha256: &'a str,
+    pub md5: &'a str,
+    pub created_at_micros: i64,
+    pub submitter: Uuid,
+    pub signature: &'a [u8],
+}
+
+/// The integrity-chain `record_hash` of a `BSim` object.
+#[must_use]
+pub fn bsim_record_hash(record: &BsimRecord<'_>) -> Digest32 {
+    hash_fields(
+        BSIM_RECORD_DOMAIN,
+        &[
+            record.bsim_id.as_bytes(),
+            record.source_id.as_bytes(),
+            record.sha256.as_bytes(),
+            record.md5.as_bytes(),
+            &record.created_at_micros.to_be_bytes(),
+            record.submitter.as_bytes(),
+            record.signature,
+        ],
+    )
+}
+
+/// The stored provenance fields an integrity entry commits to.
+#[derive(Clone, Copy, Debug)]
+pub struct ProvenanceRecord<'a> {
+    pub provenance_id: Uuid,
+    pub source_id: Uuid,
+    /// Lowercase hex, exactly as stored.
+    pub sha256: &'a str,
+    pub md5: &'a str,
+    pub created_at_micros: i64,
+    pub submitter: Uuid,
+    pub signature: &'a [u8],
+}
+
+/// The integrity-chain `record_hash` of a provenance seal.
+#[must_use]
+pub fn provenance_record_hash(record: &ProvenanceRecord<'_>) -> Digest32 {
+    hash_fields(
+        PROVENANCE_RECORD_DOMAIN,
+        &[
+            record.provenance_id.as_bytes(),
+            record.source_id.as_bytes(),
+            record.sha256.as_bytes(),
+            record.md5.as_bytes(),
+            &record.created_at_micros.to_be_bytes(),
+            record.submitter.as_bytes(),
+            record.signature,
+        ],
+    )
 }
 
 /// Complete integrity entry ready for atomic insertion.
@@ -187,18 +248,15 @@ pub fn chain_uncovered_bsim_postgres(
         let created_at: DateTime<Utc> = row.get(5);
         let submitter: Uuid = row.get(6);
         let signature: Vec<u8> = row.get(7);
-        let record_hash = hash_fields(
-            BSIM_RECORD_DOMAIN,
-            &[
-                bsim_id.as_bytes(),
-                source_id.as_bytes(),
-                sha256.as_bytes(),
-                md5.as_bytes(),
-                &created_at.timestamp_micros().to_be_bytes(),
-                submitter.as_bytes(),
-                &signature,
-            ],
-        );
+        let record_hash = bsim_record_hash(&BsimRecord {
+            bsim_id,
+            source_id,
+            sha256: &sha256,
+            md5: &md5,
+            created_at_micros: created_at.timestamp_micros(),
+            submitter,
+            signature: &signature,
+        });
         if covered.contains(&record_hash.to_string()) {
             continue;
         }
@@ -259,9 +317,27 @@ pub fn chain_uncovered_bsim_postgres(
     })
 }
 
+/// A `PostgreSQL` error with the server's code, message and detail.
+///
+/// `postgres::Error`'s own text is only "db error" for server-side errors,
+/// which hides the cause (e.g. a permission or constraint violation).
+#[must_use]
+pub fn describe_db_error(error: &postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |db| {
+            let detail = db
+                .detail()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default();
+            format!("{} {}{detail}", db.code().code(), db.message())
+        },
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum BsimChainError {
-    #[error("database operation failed: {0}")]
+    #[error("database operation failed: {}", describe_db_error(.0))]
     Database(#[from] postgres::Error),
     #[error("integrity system identity does not exist")]
     UnknownSystemIdentity,

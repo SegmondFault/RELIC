@@ -1,0 +1,522 @@
+# Signed messages: authentication, registration, revocation, flags and claims
+
+RELIC has no passwords. Every human account is an Ed25519 public key, and
+authentication is proof of possession of the matching private key over a
+single-use challenge. The private key never leaves the user's machine.
+
+The canonical formats below are defined in `crates/relic-crypto/src/auth.rs`.
+The Python API re-implements them in `database/api/crypto.py` and is pinned to
+`crates/relic-crypto/tests/vectors/auth-v1.json`; both test suites fail if
+either side diverges. Any change to a field, its order or encoding, or a
+domain tag requires a `v2` and new vectors.
+
+## Challenges
+
+`POST /v1/auth/challenge` returns:
+
+```json
+{
+  "challenge_id": "d30e2223-43ac-4b1f-adec-e2cbbb901837",
+  "purpose": "login",
+  "nonce": "<32 random bytes, hex>",
+  "audience": "https://relic.example.org",
+  "expires_at": "2026-11-19T22:53:17.465769Z",
+  "expires_at_unix_micros": 1795128797465769
+}
+```
+
+The database (`catalogue.auth_challenge`, migration 008) guarantees that a
+challenge is consumed at most once and never after `expires_at`. The API
+consumes the challenge *before* checking the signature, so a failed attempt
+burns it. `audience` binds the proof to one deployment. The request names only
+the `purpose` (`login` or `registration`): a challenge is bound to no account,
+so issuing one reveals nothing about which keys or accounts exist.
+
+## Encoding
+
+Every signature uses the RELIC primitive:
+
+```
+record    = u64be(len(D)) || D || for each field: u64be(len(f)) || f
+digest    = SHA-256(record)
+message   = u64be(len(S)) || S || digest
+signature = Ed25519(private_key, message)
+```
+
+`D` is the record domain and `S` the signature domain. UUIDs are their 16 RFC
+4122 bytes, integers are big-endian, text is UTF-8 exactly as submitted (the
+API rejects rather than trims surrounding whitespace), and an optional text is
+`0x00` when absent or `0x01 || bytes` when present.
+
+Common challenge fields, in order: `challenge_id`, `nonce`, `audience`,
+`expires_at_unix_micros` (i64).
+
+### Login
+
+- `D = RELIC:login-challenge:v1`, `S = RELIC:login-signature:v1`
+- fields: common challenge fields, then `public_key` (32 bytes)
+- `POST /v1/auth/login` with `{challenge_id, public_key, signature}`
+
+The client identifies itself by its public key, which is unique across all
+accounts; `GET /v1/me` returns the User ID afterwards. The API checks, in
+order:
+
+1. The challenge is a live, unused login challenge (it is consumed either way).
+2. The signature verifies under the **submitted** public key. This happens
+   before any account lookup, so without the private key every failure (unknown
+   key, wrong signature, spent challenge) is the same `401` on the same path.
+3. Only then is the key looked up. Because the caller has proven possession,
+   the API can tell them about their own state: `403 Registration is pending
+   approval`, `403 Registration was rejected` or `403 Account has been revoked`.
+   An unknown key or a system account is `401`.
+
+An active human account gets a bearer token. The account is re-checked on
+every request.
+
+### Registration
+
+- `D = RELIC:registration-request:v1`, `S = RELIC:registration-proof-signature:v1`
+- fields: common challenge fields, then `public_key` (32 bytes),
+  `requested_role`, `name`, optional `organisation`, `email`
+- `POST /v1/accounts` with those values plus `challenge_id` and `signature`
+
+The signature proves the applicant holds the private key and binds every
+detail they submitted. The result is a pending `catalogue.registration_request`,
+not an account. System accounts and the first Moderator are created by the
+database operator.
+
+### Registration decision
+
+- `D = RELIC:registration-decision:v1`, `S = RELIC:registration-decision-signature:v1`
+- fields: `registration_request_id`, `public_key` (32 bytes), `requested_role`,
+  `name`, optional `organisation`, `email`, `moderator_id`, `decision`
+  (`approved` or `rejected`)
+- `POST /v1/registrations/{id}/decision` with `{moderator_id, decision, signature}`
+
+The Moderator signs exactly what they reviewed (`GET /v1/registrations/{id}`)
+and their verdict. The API requires `moderator_id` to be the authenticated
+account, verifies the signature with that Moderator's registered key over the
+request row as stored, and records it through `catalogue.decide_registration()`
+in the same transaction. That function is the only way the application can
+create a human account; the database re-checks that the decider is an active
+Moderator and that the decision is final. There is no challenge: the request
+ID is unique and a decision can be recorded once, so a captured decision cannot
+be replayed.
+
+**Moderator registrations need two Moderators.** Each signs this same
+decision message with their own `moderator_id`. The first approval is stored
+in `registration_approval` (`202 awaiting_second_approval`); the approval of a
+second, different active Moderator creates the account. One rejection is
+final. The database enforces the rule too (inside `decide_registration()`),
+so neither a single Moderator nor an API bug can add a Moderator. It checks
+that two different active Moderators approved, not their signatures: a
+compromised API could store forged approvals, which `relic-verify` reports.
+The first Moderators are created by the database operator. Every field is stored in the row, so anyone can re-verify the
+decision later without the API.
+
+### Revocation request
+
+- `D = RELIC:revocation-request:v1`, `S = RELIC:revocation-request-signature:v1`
+- fields: `revocation_id`, `requester_id` (both UUID bytes), `target_type`
+  (a `corpus_target_type` value, e.g. `user` or `fidbf`), `target_id`, `reason`
+- `POST /v1/revocations` with those values plus `signature`
+
+Who requests depends on the target: an active **Analyst** requests revocation
+of a catalogue entry, an active **Moderator** files the revocation of an
+account (`target_type = user`, never their own). Anything else is `403`, and
+the database enforces the same. `requester_id` must be the caller. (Until 008
+the field was named `analyst_id`; the encoding is unchanged.) The API verifies
+the signature with the key registered for `requester_id`, never a key from the
+request. There is no challenge: the requester chooses
+`revocation_id` (a fresh UUID) and signs it, and it is the row's primary key,
+so a signed request is stored at most once. An identical retry returns the
+stored request (`200`); the same ID with different content is `409`.
+
+The database allows one open request per target and refuses a request for a
+target that is already revoked (both `409`). A rejected target can be
+requested again. The requester must be active when filing; the
+request stays decidable if they are revoked afterwards, so a revoked requester
+cannot block a target. System accounts (the integrity and MMR workers) cannot
+be revoked through the API (`403`): revoking one stops admissions and
+checkpoints, so only the database operator (`relic_owner`) can do it. Revoking an account (`target_type = user`) is how a lost or
+compromised key is handled: the next request with its token is `401`, and
+login reports `403 Account has been revoked`.
+
+### Revocation decision
+
+- `D = RELIC:revocation-decision:v1`, `S = RELIC:revocation-decision-signature:v1`
+- fields: the five request fields as stored, then `moderator_id`, `decision`
+  (`approved` or `rejected`)
+- `POST /v1/revocations/{id}/decision` with `{moderator_id, decision, signature}`
+
+Any active Moderator may decide, including the one who filed the request:
+revoking a Viewer or Analyst account takes one Moderator. As with
+registrations, the Moderator signs exactly what they reviewed
+(`GET /v1/revocations/{id}`) and their verdict, `moderator_id` must be the
+caller, and the API verifies with that Moderator's registered key over the
+stored row in the same transaction as the update. The database re-checks that
+the decider is an active Moderator,
+forbids a Moderator deciding the revocation of their own account, sets
+`decided_at` from its own clock, and makes the decision final. Revoking a
+Moderator account needs two different Moderators, neither of them the target:
+the first approval is stored in `revocation_approval` (`202`), the second
+revokes; one rejection is final. Only the database operator may decide such a
+revocation alone (e.g. with only two Moderators). Anyone logged in
+can read revocations and re-verify both signatures from the row.
+
+### Flag
+
+- `D = RELIC:flag:v1`, `S = RELIC:flag-signature:v1`
+- fields: `flag_id`, `viewer_id` (both UUID bytes), `target_type`
+  (a `corpus_target_type` value), `target_id`, `note`
+- `POST /v1/flags` with those values plus `signature`
+
+Only an active Viewer can flag, and `viewer_id` must be the caller; the API
+verifies with the key registered for `viewer_id`. As with revocation requests,
+the Viewer chooses `flag_id` and signs it, so a flag is stored at most once: an
+identical retry is `200`, the same ID with different content `409`.
+
+Anything can be flagged: a catalogue object, an account, another flag or a
+flag response (Viewers cannot request revocations, so a flag is how they report
+an account or an abusive flag). The database allows one flag per Viewer and
+target (`409`), refuses a flag on a revoked target (`409`) and on an unknown
+one (`422`), and sets `created_at` from its own clock. A flag has no status:
+Analysts answer it with responses, and act on it by requesting a revocation of
+its target, or of the flag itself.
+
+### Flag response
+
+- `D = RELIC:flag-response:v1`, `S = RELIC:flag-response-signature:v1`
+- fields: `flag_response_id`, then the five flag fields as stored, then
+  `analyst_id` and the response `note`
+- `POST /v1/flags/{flag_id}/responses` with
+  `{flag_response_id, analyst_id, note, signature}`
+
+Only an active Analyst can respond, and `analyst_id` must be the caller. The
+Analyst signs the flag exactly as read from `GET /v1/flags/{id}`, so the
+response attests what was answered; the API verifies it over the stored flag.
+A flag can have many responses. A revoked flag takes no new responses (`409`).
+A response can itself be flagged and revoked (`target_type = flag_response`).
+Anyone logged in can read flags and responses and re-verify both signatures
+from the two rows.
+
+### Licence assertion
+
+- `D = RELIC:license-assertion:v1`, `S = RELIC:license-assertion-signature:v1`
+- fields: `license_assertion_id`, `analyst_id`, `target_type` (`source` or
+  `binary`), `target_id`, `spdx_expression`, `basis` (`declared`, `detected`,
+  `inferred`, `analyst_assessed`), `confidence` (optional), and
+  `evidence_provenance_id` (optional: `0x00`, or `0x01` and the 16 UUID bytes)
+- `POST /v1/license-assertions` with those values plus `signature`
+
+`confidence` is signed as text with exactly four decimals (`0.0000` to
+`1.0000`), the form PostgreSQL stores, so the row rebuilds to the signed
+bytes; `"0.5"` is refused. The API checks the SPDX expression's syntax
+(identifiers are not looked up in the SPDX licence list; local licences use
+`LicenseRef-`), and stores and signs it exactly as given. No integrity-chain
+entry: an assertion is an independent, immutable claim. A correction is a new
+assertion plus a revocation of the old one. Refused on a revoked target
+(`409`); an unknown target or evidence row is `422`.
+
+### Classification
+
+- `D = RELIC:classification:v1`, `S = RELIC:classification-signature:v1`
+- fields: `classification_id`, `analyst_id`, `target_type` (`binary`,
+  `function` or `behavioural_composition`), `target_id`, `label`, then the
+  optional `confidence` (four decimals, as above), `misp_universe`,
+  `misp_uuid` (`0x00`, or `0x01` and 16 bytes) and `evidence_json`
+- `POST /v1/classifications` with those values plus `signature`
+
+`evidence_json` is a JSON object sent as a string and signed as that exact
+text (no duplicate keys, no `NaN`, at most 32 levels deep). PostgreSQL's
+`jsonb` reorders keys and rewrites numbers, so the exact text is stored next
+to the parsed `evidence` and must parse to the same value; reads return both.
+`misp_universe` and `misp_uuid` come together. Classifications are immutable
+and refused on revoked targets, like licence assertions.
+
+### Software component
+
+- `D = RELIC:software-component:v1`, `S = RELIC:software-component-signature:v1`
+- fields: `component_id`, `analyst_id`, `name`, `component_kind`, then the
+  optional `namespace` and `purl`
+- `POST /v1/software-components` with those values plus `signature`
+
+A component names software; it claims nothing about any binary. `purl` must
+be a package URL (`pkg:type/...`) and is signed exactly as given.
+
+### Software release
+
+- `D = RELIC:software-release:v1`, `S = RELIC:software-release-signature:v1`
+- fields: `software_release_id`, `analyst_id`, `component_id`, then the
+  optional `version` and `source_id` (`0x00`, or `0x01` and 16 bytes)
+- `POST /v1/software-releases` with those values plus `signature`
+
+Refused (`409`) when the component or source is revoked.
+
+### Binary-component assertion
+
+- `D = RELIC:binary-component-assertion:v1`,
+  `S = RELIC:binary-component-assertion-signature:v1`
+- fields: `binary_component_assertion_id`, `analyst_id`, `binary_id`,
+  `software_release_id`, `relationship` (`build_of`, `statically_contains`,
+  `dynamically_links`, `derived_from`, `other`), `basis` (as for licences),
+  then the optional `confidence` (four decimals) and `evidence_provenance_id`
+- `POST /v1/binary-component-assertions` with those values plus `signature`
+
+Refused (`409`) when the binary, the release or the release's component is
+revoked.
+
+### Behavioural composition
+
+- `D = RELIC:behavioural-composition:v1`,
+  `S = RELIC:behavioural-composition-signature:v1`
+- fields: `behavioural_composition_id`, `analyst_id`, `name`, the optional
+  `description` and `evidence_provenance_id`, then `members`
+- each member is encoded on its own as
+  `encode_fields("RELIC:composition-member:v1", [target_type, target_id,
+  member_role, sequence_number])`, where `target_type` is `binary` or
+  `function` and `sequence_number` is optional (`0x00`, or `0x01` and a
+  big-endian `u32`)
+- the `members` field is those encodings **sorted bytewise**, each prefixed
+  with its length as a big-endian `u64`, so the order in which members are
+  listed does not change the signature
+- `POST /v1/behavioural-compositions` with those values, the members as a
+  list, and `signature`
+
+1 to 500 distinct members, each `sequence_number` used at most once (the
+database enforces it too). The composition and its members are written in
+one transaction and the database refuses a member added later (the row
+states its `member_count`, checked when the transaction commits), so the
+stored membership is always the signed one. Refused (`409`) when a member is
+revoked.
+
+Every claim that cites `evidence_provenance_id` (licence assertions,
+binary-component assertions, compositions) is refused (`409`) when that
+provenance is revoked. Reads of releases, binary-component assertions and
+compositions carry `ancestor_revoked`: true when a row they depend on (their
+component, release, source, binary, member or evidence) is revoked, while
+`revoked` still reports only the row itself.
+
+### BSim object
+
+- `D = RELIC:analyst-bsim:v1`, `S = RELIC:analyst-bsim-signature:v1`
+- fields: `bsim_id`, `analyst_id`, `source_id`, the SHA-256 and the MD5 of
+  `object_json` (each as lowercase hex text), then the function links: for
+  each link the 16 `function_id` bytes followed by the 16 `binary_id` bytes,
+  the links **sorted bytewise** and concatenated, so their order does not matter
+- `POST /v1/bsim` with `bsim_id`, `analyst_id`, `source_id`, `object_json`,
+  `functions` (a list of `{function_id, binary_id}`) and `signature`
+
+`object_json` is the BSim object as a JSON object in a string, signed by its
+digests and stored as that exact text; the database requires the stored
+SHA-256 and MD5 to be its digests. 1 to 10,000 distinct links.
+
+### Provenance seal
+
+- `D = RELIC:analyst-provenance:v1`, `S = RELIC:analyst-provenance-signature:v1`
+- fields: `provenance_id`, `analyst_id`, `source_id`, the optional
+  `fidbf_id`, `bsim_id` and `binary_id` (`0x00`, or `0x01` and 16 bytes),
+  the optional `schema_name` and `schema_version`, then the SHA-256 and MD5 of
+  `object_json` (lowercase hex text)
+- `POST /v1/provenance` with those values, `object_json` and `signature`
+
+At least one of `fidbf_id`, `bsim_id` and `binary_id`. The seal is stored
+verbatim like a BSim object, so `unmapped.relic` is kept exactly.
+
+BSim objects, provenance seals and FIDBF manifests take an integrity-chain
+entry, which only `relic-admit` can sign: the API stages them and answers
+`202`; the signatures are verified when `relic-admit` admits them, and a
+submission that fails is marked `rejected` with the reason
+(`GET /v1/submissions/{id}`).
+
+## Client
+
+Generate a key used only for RELIC, and build the signer:
+
+```bash
+ssh-keygen -t ed25519 -a 100 -C relic -f ~/.ssh/relic_ed25519
+cargo build --release -p relic-ingest
+```
+
+The signer has no passphrase prompt yet: for an encrypted key pass
+`--key-passphrase-file <file>` (mode `0600`) to each command below.
+
+**Register** (applicant):
+
+```bash
+curl -s -X POST https://$HOST/v1/auth/challenge \
+     -H 'content-type: application/json' -d '{"purpose":"registration"}' > challenge.json
+target/release/relic-sign-challenge register --challenge challenge.json \
+     --key ~/.ssh/relic_ed25519 --role analyst --name "Ada Lovelace" \
+     --email ada@example.org [--organisation "..."] > register.json
+curl -s -X POST https://$HOST/v1/accounts \
+     -H 'content-type: application/json' -d @register.json
+```
+
+**Log in** (anyone with a key; the same command tells an applicant whether
+their request is still pending or was rejected):
+
+```bash
+curl -s -X POST https://$HOST/v1/auth/challenge \
+     -H 'content-type: application/json' -d '{"purpose":"login"}' > challenge.json
+target/release/relic-sign-challenge login --challenge challenge.json \
+     --key ~/.ssh/relic_ed25519 > login.json
+TOKEN="$(curl -s -X POST https://$HOST/v1/auth/login \
+     -H 'content-type: application/json' -d @login.json | jq -r .access_token)"
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/me    # your user_id and role
+```
+
+**Decide a registration** (Moderator, after logging in as above). The tool
+prints what it is about to sign on stderr and refuses a request that is no
+longer pending:
+
+```bash
+MODERATOR_ID="$(curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/me | jq -r .user_id)"
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/registrations    # pending requests
+curl -s -H "authorization: Bearer $TOKEN" \
+     https://$HOST/v1/registrations/$REQUEST_ID > request.json
+target/release/relic-sign-challenge decide-registration --request request.json \
+     --moderator-id "$MODERATOR_ID" --decision approved \
+     --key ~/.ssh/relic_ed25519 > decision.json
+curl -s -X POST https://$HOST/v1/registrations/$REQUEST_ID/decision \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @decision.json
+```
+
+**Request a revocation**: an Analyst for a catalogue entry, a Moderator for
+an account (logged in as above; `$MY_ID` from `/v1/me`). Keep the printed body:
+resending it unchanged is a safe retry. A Moderator then decides it, and may
+decide their own request (a Moderator account needs a second Moderator).
+
+```bash
+target/release/relic-sign-challenge request-revocation --requester-id "$MY_ID" \
+     --target-type user --target-id "$TARGET_ID" --reason "Key reported lost" \
+     --key ~/.ssh/relic_ed25519 > revocation.json
+curl -s -X POST https://$HOST/v1/revocations \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @revocation.json
+```
+
+**Decide a revocation** (Moderator). The tool first verifies the request's
+signature with the requester's registered key (`--requester`, from
+`/v1/users/{analyst_id}`) and prints the requester and the target
+(`--target`, from the target's read route, e.g. `/v1/users/{id}` or
+`/v1/fidbf/{id}`) on stderr. It refuses to sign if the signature does not
+verify, either file belongs to someone else, the target is not given, or the
+request is no longer pending. Every target type has a read route, so
+`--target` is always required.
+
+```bash
+curl -s -H "authorization: Bearer $TOKEN" "https://$HOST/v1/revocations?status=pending"
+curl -s -H "authorization: Bearer $TOKEN" \
+     https://$HOST/v1/revocations/$REVOCATION_ID > revocation.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     "https://$HOST/v1/users/$(jq -r .analyst_id revocation.json)" > requester.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     "https://$HOST/v1/users/$(jq -r .target_id revocation.json)" > target.json   # route by target_type
+target/release/relic-sign-challenge decide-revocation --request revocation.json \
+     --requester requester.json --target target.json \
+     --moderator-id "$MODERATOR_ID" --decision approved \
+     --key ~/.ssh/relic_ed25519 > decision.json
+curl -s -X POST https://$HOST/v1/revocations/$REVOCATION_ID/decision \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @decision.json
+```
+
+**Flag** (Viewer; `$VIEWER_ID` from `/v1/me`). Resending the printed body
+unchanged is a safe retry:
+
+```bash
+target/release/relic-sign-challenge flag --viewer-id "$VIEWER_ID" \
+     --target-type binary --target-id "$BINARY_ID" --note "Licence looks wrong" \
+     --key ~/.ssh/relic_ed25519 > flag.json
+curl -s -X POST https://$HOST/v1/flags \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @flag.json
+```
+
+**Respond to a flag** (Analyst). The tool prints the flag it is answering on
+stderr and refuses a revoked flag:
+
+```bash
+curl -s -H "authorization: Bearer $TOKEN" https://$HOST/v1/flags/$FLAG_ID > flag.json
+target/release/relic-sign-challenge respond-flag --flag flag.json \
+     --analyst-id "$ANALYST_ID" --note "Checked, licence corrected" \
+     --key ~/.ssh/relic_ed25519 > response.json
+curl -s -X POST https://$HOST/v1/flags/$FLAG_ID/responses \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d @response.json
+```
+
+**Assert a licence or classify** (Analyst). Resending the printed body is a
+safe retry:
+
+```bash
+target/release/relic-sign-challenge assert-license --analyst-id "$ANALYST_ID" \
+     --target-type binary --target-id "$BINARY_ID" --spdx "MIT OR Apache-2.0" \
+     --basis detected --confidence 0.9500 --key ~/.ssh/relic_ed25519 > license.json
+curl -s -X POST https://$HOST/v1/license-assertions \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @license.json
+
+target/release/relic-sign-challenge classify --analyst-id "$ANALYST_ID" \
+     --target-type function --target-id "$FUNCTION_ID" --label crypto/aes \
+     --evidence evidence.json --key ~/.ssh/relic_ed25519 > classification.json
+curl -s -X POST https://$HOST/v1/classifications \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @classification.json
+```
+
+**Software components, releases, component assertions and compositions**
+(Analyst). Resending a printed body is a safe retry. `compose` reads its
+members from a JSON file and prints them on stderr before signing:
+
+```bash
+target/release/relic-sign-challenge create-component --analyst-id "$ANALYST_ID" \
+     --name zlib --kind library --purl pkg:generic/zlib \
+     --key ~/.ssh/relic_ed25519 > component.json
+target/release/relic-sign-challenge create-release --analyst-id "$ANALYST_ID" \
+     --component-id "$(jq -r .component_id component.json)" --version 1.3.1 \
+     --key ~/.ssh/relic_ed25519 > release.json
+target/release/relic-sign-challenge assert-component --analyst-id "$ANALYST_ID" \
+     --binary-id "$BINARY_ID" --software-release-id "$(jq -r .software_release_id release.json)" \
+     --relationship statically_contains --basis detected --confidence 0.9000 \
+     --key ~/.ssh/relic_ed25519 > assertion.json
+
+cat > members.json <<'JSON'
+[{"target_type": "binary",   "target_id": "<binary id>",   "member_role": "loader",  "sequence_number": 0},
+ {"target_type": "function", "target_id": "<function id>", "member_role": "payload", "sequence_number": 1}]
+JSON
+target/release/relic-sign-challenge compose --analyst-id "$ANALYST_ID" \
+     --name "Staged loader" --members members.json \
+     --key ~/.ssh/relic_ed25519 > composition.json
+```
+
+POST them, in that order, to `/v1/software-components`,
+`/v1/software-releases`, `/v1/binary-component-assertions` and
+`/v1/behavioural-compositions`, as above.
+
+**FIDBF, BSim and provenance** (Analyst). Sign the FIDBF manifest with the
+store path the API requires, upload the object, then post the manifest;
+the response's `status_url` shows when `relic-admit` has admitted it:
+
+```bash
+target/release/relic-sign-fidbf --manifest manifest.json --fidbf-object object.fidbf \
+     --analyst-key ~/.ssh/relic_ed25519 --canonical-storage-path --output signed.json
+SHA="$(sha256sum object.fidbf | cut -d' ' -f1)"
+curl -s -X PUT https://$HOST/v1/fidbf-objects/$SHA \
+     -H "authorization: Bearer $TOKEN" --data-binary @object.fidbf
+curl -s -X POST https://$HOST/v1/fidbf \
+     -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @signed.json
+curl -s -H "authorization: Bearer $TOKEN" \
+     https://$HOST/v1/submissions/"$(jq -r .fidbf.fidbf_id signed.json)"   # pending, then admitted
+
+target/release/relic-sign-challenge sign-bsim --analyst-id "$ANALYST_ID" \
+     --source-id "$SOURCE_ID" --object bsim.json --functions links.json \
+     --key ~/.ssh/relic_ed25519 > bsim-body.json          # links.json: [{"function_id", "binary_id"}]
+target/release/relic-sign-challenge sign-provenance --analyst-id "$ANALYST_ID" \
+     --source-id "$SOURCE_ID" --bsim-id "$(jq -r .bsim_id bsim-body.json)" \
+     --schema-name ocsf --object seal.json --key ~/.ssh/relic_ed25519 > seal-body.json
+```
+
+POST them to `/v1/bsim` and `/v1/provenance` like the manifest. Download an
+admitted FIDBF with `GET /v1/fidbf/{id}/download` and compare its SHA-256 with
+the `X-Content-SHA256` header.

@@ -12,6 +12,11 @@ The additive model has three tables:
 | `software_release` | Optional version/source identity for a component. Unknown version or source remains `NULL`. |
 | `binary_component_assertion` | Signed analyst claim connecting one Binary to one release. |
 
+Every row in all three is signed by the Analyst who wrote it (formats in
+[`authentication.md`](authentication.md#software-component)) and written
+through `POST /v1/software-components`, `/v1/software-releases` and
+`/v1/binary-component-assertions`; `relic-verify` re-checks each signature.
+
 An assertion records:
 
 - `relationship`: `build_of`, `statically_contains`, `dynamically_links`,

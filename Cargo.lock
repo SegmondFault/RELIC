@@ -1262,6 +1262,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek 3.0.0",
  "rand_core 0.6.4",
+ "serde_json",
  "sha2 0.11.1",
  "ssh-key",
  "tempfile",
@@ -1285,6 +1286,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "libc",
  "md-5",
  "postgres",
  "relic-crypto",
@@ -1335,6 +1337,23 @@ dependencies = [
  "md-5",
  "relic-crypto",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "relic-verify"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "postgres",
+ "relic-crypto",
+ "relic-domain",
+ "relic-ingest",
+ "relic-integrity-worker",
+ "relic-mmr-worker",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

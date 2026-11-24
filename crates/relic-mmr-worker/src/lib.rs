@@ -588,10 +588,28 @@ fn parse_public_key(bytes: Vec<u8>, user_id: Uuid) -> Result<[u8; 32], StoreErro
         .map_err(|_| StoreError::MalformedPublicKey(user_id))
 }
 
+/// A `PostgreSQL` error with the server's code, message and detail.
+///
+/// `postgres::Error`'s own text is only "db error" for server-side errors,
+/// which hides the cause (e.g. a permission or constraint violation).
+#[must_use]
+fn describe_db_error(error: &postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |db| {
+            let detail = db
+                .detail()
+                .map(|detail| format!(" ({detail})"))
+                .unwrap_or_default();
+            format!("{} {}{detail}", db.code().code(), db.message())
+        },
+    )
+}
+
 /// Failure while rebuilding, verifying or storing a checkpoint.
 #[derive(Debug, Error)]
 pub enum StoreError {
-    #[error("PostgreSQL operation failed: {0}")]
+    #[error("PostgreSQL operation failed: {}", describe_db_error(.0))]
     Database(#[from] postgres::Error),
     #[error("MMR format_version must fit a positive PostgreSQL integer")]
     InvalidFormatVersion,

@@ -29,6 +29,94 @@ The integrity-system private key is different: it belongs to the narrowly
 scoped server worker and signs the RELIC integrity envelope after the analyst
 submission has verified.
 
+## Admission through the API (`relic-admit`)
+
+The API never holds the integrity key, so it cannot admit anything that takes
+an integrity-chain entry. For FIDBF, BSim and provenance it only stages:
+
+1. the Analyst uploads a FIDBF object (`PUT /v1/fidbf-objects/{sha256}`),
+   which the API streams into the staging directory while hashing;
+2. the Analyst posts the signed manifest, BSim object or provenance seal;
+   the API checks its shape and that the caller is the Analyst it names,
+   stores it verbatim in `catalogue.submission` and answers `202`;
+3. `relic-admit`, on the host as `relic_worker` with the integrity key, takes
+   one pending submission at a time and, in one serializable transaction,
+   verifies every signature with the Analyst's registered key, admits the
+   rows with their integrity entry and marks the submission `admitted`, or
+   marks it `rejected` with the reason. A FIDBF object is copied into the
+   content-addressed store (`<first two hex digits>/<sha256>.fidbf`) and
+   checked against the signed digests on the way.
+
+Everything staged is untrusted: the API that wrote it may be compromised.
+`relic-admit` requires a submission to name its own object and Analyst, and
+opens a staged file without following links and only if it is a plain,
+single-link file, so a staged link cannot publish a host file (a private key,
+say) as a FIDBF object. `relic_app` can insert submissions but not change
+them; `relic_worker` can change only a submission's outcome, and only once.
+
+## Database login
+
+The workers connect as `relic_worker`, never as the API's `relic_app`
+(`relic-verify` uses its own read-only `relic_auditor`), through the local Unix
+socket with peer authentication, so neither role has a password. Set-up:
+[`docs/deployment.md`](deployment.md).
+
+```bash
+export RELIC_DATABASE_URL='host=/var/run/postgresql dbname=relic user=relic_worker'
+```
+
+`relic_worker` may append FIDBF admissions (source, batch, binary, FIDBF,
+functions), BSim objects with their function links, provenance seals,
+integrity entries and MMR checkpoints, record submission outcomes, and read
+catalogue data;
+it cannot update or delete anything, or read contact details, registration
+requests or login challenges. `relic_app` cannot append integrity entries or
+checkpoints, so a compromised API cannot add forged system-signed rows to the
+chain. PostgreSQL requires every stored signature to be 64 bytes but does not
+verify signatures; the system keys stay with the workers.
+
+## Verifier (`relic-verify`)
+
+PostgreSQL checks roles, lengths and who a row names, but not signatures.
+`relic-verify` re-checks everything from the stored rows alone, in one
+read-only snapshot, as `relic_auditor`:
+
+- registration proofs (applicant key over the challenge), registration
+  decisions and first approvals, and that each approved account matches its
+  request; a Moderator approved without a second Moderator is a failure;
+- revocation requests, decisions and first approvals;
+- flags and flag responses;
+- licence assertions and classifications;
+- software components and releases, binary-component assertions, and
+  behavioural compositions together with their stored members;
+- every source signature, and every FIDBF admission rebuilt from its source,
+  batch, binary, function and FIDBF rows (all three analyst signatures);
+- every BSim object (with its stored function links) and provenance seal:
+  the Analyst's signature, and that the stored digests are those of the
+  stored text;
+- the integrity chain: one linear chain from one genesis, every chain hash and
+  system signature, and that every entry commits to a stored FIDBF admission,
+  BSim object or provenance seal;
+- every MMR checkpoint against the MMR rebuilt from the chain, and its
+  system signature.
+
+Provenance stored only as an external path (legacy, no signed format) and
+accounts created by the operator are counted as not checkable. Exit status: `0`
+verified, `1` at least one failure, `2` could not run. `--json` for machines,
+`--quiet` prints only failures and warnings.
+
+```cron
+# /etc/cron.d/relic-verify: hourly; cron mails any output, --quiet prints only problems.
+# Peer authentication over the Unix socket: no password (see docs/deployment.md).
+15 * * * *  ns  RELIC_DATABASE_URL='host=/var/run/postgresql dbname=relic user=relic_auditor' /srv/relic/target/release/relic-verify --quiet
+```
+
+Run it on the database host, outside the API's container, so a compromised
+API cannot silence it. Like the other Rust tools it does not speak TLS to
+PostgreSQL: it connects through the local Unix socket only. It detects; it does not repair: rows are append-only, and the
+response to a failure is to revoke the forged row or account and investigate.
+Locally: `scripts/local-dev.sh verify`.
+
 ## Object worker
 
 `relic-object-worker` calculates or independently verifies content digests at
