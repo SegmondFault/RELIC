@@ -1,16 +1,18 @@
-//! Cross-language test vectors for the MMR and its inclusion proofs.
+//! Cross-language test vectors for the MMR, its inclusion proofs and the
+//! checkpoint signature.
 //!
 //! The Python API test-suite checks its own implementation against the same
 //! file, so the server and the Rust verifier can never drift apart.
 //! Regenerate deliberately with
-//! `RELIC_WRITE_VECTORS=1 cargo test -p relic-mmr-worker --test inclusion_vectors`.
+//! `RELIC_WRITE_VECTORS=1 cargo test -p relic-proof --test inclusion_vectors`.
 
-use std::{fs, path::PathBuf};
+use std::{fmt::Write as _, fs, path::PathBuf};
 
-use relic_crypto::{Digest32, sha256};
-use relic_mmr_worker::{
+use relic_crypto::{Digest32, SystemSigner, sha256};
+use relic_proof::{
     MmrFrontier,
     proof::{InclusionProof, PROOF_FORMAT_VERSION, prove},
+    sign_checkpoint,
 };
 use serde_json::{Value, json};
 
@@ -123,6 +125,44 @@ fn build() -> Value {
         "chain_hashes": hashes.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "mmrs": mmrs,
         "rejected": forged_cases(&hashes[..13]),
+        "checkpoint_signature": checkpoint_signature(&hashes[..13]),
+    })
+}
+
+/// A checkpoint over the first 13 leaves signed with a fixed Ed25519 seed.
+/// Ed25519 signatures are deterministic, so another implementation of the
+/// checkpoint hash must reproduce this exact signature.
+fn checkpoint_signature(chain_hashes: &[Digest32]) -> Value {
+    const SEED: [u8; 32] = [0x5a; 32];
+    const SYSTEM_UID: &str = "1d0c5f00-7e57-4a11-8c0d-00000000c0de";
+    const CREATED_AT_MICROS: i64 = 1_790_000_000_654_321;
+    let signer = SystemSigner::from_seed(SEED);
+    let checkpoint = sign_checkpoint(
+        &frontier_of(chain_hashes),
+        1,
+        "4242".into(),
+        SYSTEM_UID.into(),
+        CREATED_AT_MICROS,
+        &signer,
+    )
+    .unwrap();
+    checkpoint.verify(&signer.verifying_key()).unwrap();
+    let hex = |bytes: &[u8]| {
+        bytes.iter().fold(String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+    };
+    json!({
+        "seed": hex(&SEED),
+        "public_key": hex(&signer.verifying_key()),
+        "format_version": checkpoint.format_version,
+        "last_integrity_id": 4242,
+        "leaf_count": checkpoint.leaf_count,
+        "commitment": checkpoint.commitment.to_string(),
+        "system_uid": SYSTEM_UID,
+        "created_at_micros": CREATED_AT_MICROS,
+        "system_signature": hex(&checkpoint.system_signature),
     })
 }
 

@@ -1,6 +1,6 @@
 """The Python MMR proofs against the vectors the Rust suite generates.
 
-``crates/relic-mmr-worker/tests/vectors/inclusion-v1.json`` is written by the
+``crates/relic-proof/tests/vectors/inclusion-v1.json`` is written by the
 Rust tests; any divergence between the two implementations fails here.
 """
 
@@ -17,7 +17,7 @@ from api.crypto import encode_fields
 
 VECTORS = (
     Path(__file__).resolve().parents[3]
-    / "crates/relic-mmr-worker/tests/vectors/inclusion-v1.json"
+    / "crates/relic-proof/tests/vectors/inclusion-v1.json"
 )
 COMMITMENT_DOMAIN = b"RELIC:mmr-commitment:v1"
 
@@ -148,6 +148,23 @@ def test_a_checkpoint_with_the_wrong_shape_holds_nothing():
     assert mmr.checkpoint_holds(peaks, 9, peak)
     assert not mmr.checkpoint_holds(list(reversed(peaks)), 9, peak)
     assert not mmr.checkpoint_holds(peaks, 10, peak)
+
+
+@pytest.mark.parametrize("max_peak_leaves", [1, 2, 3, 4, 5, 8, 9])
+def test_small_peak_limit_matches_every_peak_layout(max_peak_leaves):
+    """The bound used to suggest an older checkpoint, against brute force."""
+    for leaf in range(48):
+        limit = mmr.small_peak_limit(leaf, max_peak_leaves)
+        for count in range(leaf + 1, 160):
+            _, height = mmr.locate_peak(leaf, count)
+            fits = 1 << height <= max_peak_leaves
+            assert fits == (count < limit), (leaf, count, max_peak_leaves)
+
+
+def test_small_peak_limit_rejects_nonsense():
+    for leaf, cap in ((-1, 4), (0, 0)):
+        with pytest.raises(mmr.ProofError):
+            mmr.small_peak_limit(leaf, cap)
 
 
 def test_out_of_range_and_wrong_sizes_are_rejected():

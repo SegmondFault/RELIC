@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from nacl.signing import SigningKey
@@ -25,13 +26,16 @@ from api.crypto import encode_fields, signing_message
 from api.main import create_app
 
 from .conftest import REPO, Database, login, make_settings
-from .test_mmr_vectors import commitment, peaks_of, stored
+from .test_auth_api import _openssh_public_key
+from .test_catalogue_api import RUST_ADMISSION, _ssh_account, admit_fidbf
+from .test_mmr_vectors import DATA, commitment, peaks_of, stored
 
 SIG = b"\x11" * 64
 MISSING = 9_000_000_000_000_000_000
 CHECKPOINT_DOMAIN = b"RELIC:mmr-checkpoint:v1"
 CHECKPOINT_SIGNATURE_DOMAIN = b"RELIC:mmr-system-signature:v1"
 VERIFY_PROOF = REPO / "target/debug/relic-verify-proof"
+CHECKPOINT_MMR = REPO / "target/debug/relic-checkpoint-mmr"
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -308,14 +312,32 @@ def test_a_checkpoint_that_does_not_match_the_chain_is_never_served(client, data
 def test_a_checkpoint_in_an_unknown_format_is_not_proven(client, database, chain):
     (entry,) = chain.append(1)
     checkpoint_id = chain.checkpoint(format_version=2)
-    response = client.get(
-        f"/v1/integrity/{entry}/proof",
-        params={"checkpoint_id": checkpoint_id},
-        headers=headers_for(client, database),
-    )
-    assert response.status_code == 501
-    chain.append(1)
+    (uncovered,) = chain.append(1)
+    headers = headers_for(client, database)
+    # 501 whether or not the checkpoint covers the entry: the format is
+    # checked first, so the answer never depends on what it cannot read.
+    for integrity_id in (entry, uncovered):
+        response = client.get(
+            f"/v1/integrity/{integrity_id}/proof",
+            params={"checkpoint_id": checkpoint_id},
+            headers=headers,
+        )
+        assert response.status_code == 501, (integrity_id, response.text)
     chain.checkpoint()
+
+
+def test_the_default_checkpoint_is_one_this_server_can_prove(client, database, chain):
+    """A newer checkpoint in another format must not hide the valid ones."""
+    (entry,) = chain.append(1)
+    provable = chain.checkpoint()
+    chain.append(1)
+    chain.checkpoint(format_version=2)  # covers more entries, unknown format
+    response = client.get(
+        f"/v1/integrity/{entry}/proof", headers=headers_for(client, database)
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["mmr_checkpoint_id"] == provable
+    chain.checkpoint()  # leave the newest entry covered in format 1
 
 
 def make_client(database, object_dirs, **overrides):
@@ -326,18 +348,113 @@ def make_client(database, object_dirs, **overrides):
 
 
 def test_a_peak_that_is_too_large_to_prove_is_refused(database, object_dirs, chain):
-    chain.append(5)
-    checkpoint_id = chain.checkpoint()
-    ids = chain.ids()
-    assert len(ids) >= 4
-    with make_client(database, object_dirs, proof_max_peak_leaves=2) as small:
+    """With single-leaf peaks only (cap 1), an even leaf is provable exactly in
+    the checkpoint that ends on it, and an odd leaf in none: the refusal must
+    say which older checkpoint can prove the entry, or that none can."""
+    if len(chain.ids()) % 2:
+        chain.append(1)
+    (even,) = chain.append(1)  # leaf index even: alone in the last peak
+    ends_on_it = chain.checkpoint()
+    (odd,) = chain.append(1)
+    chain.append(2)
+    newest = chain.checkpoint()
+    with make_client(database, object_dirs, proof_max_peak_leaves=1) as small:
         headers = headers_for(small, database)
-        first = small.get(
-            f"/v1/integrity/{ids[0]}/proof", params={"checkpoint_id": checkpoint_id},
-            headers=headers,
+
+        def proof(integrity_id, checkpoint_id=None):
+            params = {} if checkpoint_id is None else {"checkpoint_id": checkpoint_id}
+            return small.get(f"/v1/integrity/{integrity_id}/proof", params=params, headers=headers)
+
+        refused = proof(even)
+        assert refused.status_code == 503
+        detail = refused.json()["detail"]
+        assert "too large" in detail and f"checkpoint_id={ends_on_it}" in detail, detail
+        assert "Retry-After" not in refused.headers  # retrying will not help
+        suggested = proof(even, ends_on_it)
+        assert suggested.status_code == 200, suggested.text
+        assert holds(small, headers, suggested.json())
+
+        for checkpoint_id in (None, newest):
+            refused = proof(odd, checkpoint_id)
+            assert refused.status_code == 503
+            assert "no older MMR checkpoint" in refused.json()["detail"]
+
+
+def test_proofs_being_built_at_once_are_limited(database, object_dirs, chain):
+    (entry,) = chain.append(1)
+    chain.checkpoint()
+    with make_client(database, object_dirs, proof_max_concurrent=1) as limited:
+        headers = headers_for(limited, database)
+        slots = limited.app.state.proof_slots
+        assert slots.acquire("another account", 1, 1)  # its proof is being built
+        try:
+            busy = limited.get(f"/v1/integrity/{entry}/proof", headers=headers)
+            assert busy.status_code == 503
+            assert busy.headers["Retry-After"] == "1"
+            assert "retry" in busy.json()["detail"]
+        finally:
+            slots.release("another account")
+        assert limited.get(f"/v1/integrity/{entry}/proof", headers=headers).status_code == 200
+        # Every proof gives its slot back, refused ones included.
+        assert slots.total == 0
+
+
+def test_integrity_ids_must_follow_the_chain(database, chain):
+    """Migration 009: the proofs read the chain in integrity_id order, so an
+    entry may only extend the entry with the highest id below its own."""
+    chain.append(1)
+    rows = database.execute(
+        "SELECT integrity_id, chain_hash FROM catalogue.integrity"
+        " ORDER BY integrity_id DESC LIMIT 2"
+    )
+    (tip_id, tip_hash), (_, before_tip_hash) = rows
+
+    def insert(integrity_id: int, prev_hash: str | None) -> None:
+        database.execute(
+            "INSERT INTO catalogue.integrity (integrity_id, source_id, source_type,"
+            " record_hash, prev_hash, chain_hash, format_version, system_signature,"
+            " system_uid) OVERRIDING SYSTEM VALUE"
+            " VALUES (%s, %s, 'FIDBF', %s, %s, %s, 1, %s, %s)",
+            (integrity_id, chain.source_id, secrets.token_hex(32), prev_hash,
+             secrets.token_hex(32), SIG, chain.system_uid),
         )
-        assert first.status_code == 503
-        assert "too large" in first.json()["detail"]
+
+    cases = {
+        # Below every existing id, yet claiming to extend the tip: the
+        # unique-successor index alone would accept it and break the order.
+        "an id below the chain": (-tip_id, tip_hash),
+        "a second genesis": (tip_id + 1000, None),
+        "a fork": (tip_id + 1000, before_tip_hash),
+    }
+    for label, (integrity_id, prev_hash) in cases.items():
+        with pytest.raises(psycopg.errors.IntegrityConstraintViolation, match="highest integrity_id"):
+            insert(integrity_id, prev_hash)
+        assert chain.ids()[-1] == tip_id, label
+    # The ordinary path still works: the next id, extending the tip.
+    chain.append(1)
+    chain.checkpoint()
+
+
+def test_the_checkpoint_signature_matches_the_rust_vector():
+    """The Python ``sign_checkpoint`` above is what forges every checkpoint in
+    these tests; pin it to the signature Rust produces for the same input."""
+    vector = DATA["checkpoint_signature"]
+    hashes = [bytes.fromhex(item) for item in DATA["chain_hashes"][: vector["leaf_count"]]]
+    peaks = peaks_of(hashes)
+    assert commitment(len(hashes), peaks).hex() == vector["commitment"]
+    key = SigningKey(bytes.fromhex(vector["seed"]))
+    assert bytes(key.verify_key).hex() == vector["public_key"]
+    signature = sign_checkpoint(
+        key,
+        format_version=vector["format_version"],
+        last_integrity_id=vector["last_integrity_id"],
+        leaf_count=vector["leaf_count"],
+        peaks=peaks,
+        commitment_hex=vector["commitment"],
+        system_uid=uuid.UUID(vector["system_uid"]),
+        created_at_micros=vector["created_at_micros"],
+    )
+    assert signature.hex() == vector["system_signature"]
 
 
 def test_proofs_are_rate_limited_per_account(database, object_dirs, chain):
@@ -359,7 +476,7 @@ def test_proofs_are_rate_limited_per_account(database, object_dirs, chain):
 # ---------------------------------------------------------------------------
 
 needs_rust = pytest.mark.skipif(
-    not VERIFY_PROOF.exists(), reason="build with: cargo build -p relic-mmr-worker"
+    not VERIFY_PROOF.exists(), reason="build with: cargo build -p relic-proof"
 )
 
 
@@ -376,25 +493,40 @@ def verify_with_rust(tmp_path, proof: dict, checkpoint: dict, public_key: str, *
 
 @needs_rust
 def test_the_rust_client_accepts_every_proof_the_api_serves(client, database, chain, tmp_path):
+    """The API's proofs and the Rust verifier agree on every position. The
+    fixture's chain hashes are random rather than hashes of real entries, so
+    this checks the proof mechanics only; see the end-to-end test below for
+    proofs tied to real entries."""
     chain.append(12)
     checkpoint_id = chain.checkpoint()
     headers = headers_for(client, database)
     checkpoint = client.get(f"/v1/mmr-checkpoints/{checkpoint_id}", headers=headers).json()
-    # The key is fetched on its own, as a client pinning it would.
-    system = client.get(f"/v1/users/{checkpoint['system_uid']}", headers=headers).json()
-    for integrity_id in chain.ids():
-        entry = client.get(f"/v1/integrity/{integrity_id}", headers=headers).json()
+    key = chain.system_key.verify_key.encode().hex()  # pinned, not read from the API
+    ids = chain.ids()
+    for leaf, integrity_id in enumerate(ids):
         proof = client.get(
             f"/v1/integrity/{integrity_id}/proof",
             params={"checkpoint_id": checkpoint_id},
             headers=headers,
         ).json()
         result = verify_with_rust(
-            tmp_path, proof, checkpoint, system["public_key"],
-            "--chain-hash", entry["chain_hash"],
+            tmp_path, proof, checkpoint, key, "--system-uid", str(chain.system_uid)
         )
         assert result.returncode == 0, (integrity_id, result.stdout, result.stderr)
-        assert result.stdout.startswith(f"VERIFIED: integrity entry {integrity_id} "), result.stdout
+        assert result.stdout.startswith(
+            f"VERIFIED: leaf {leaf} of the MMR checkpoint of {len(ids)} entries "
+        ), result.stdout
+        # The chain hash came from the server, and the verifier says so.
+        assert "warning" in result.stderr
+
+    # --entry recomputes the chain hash, which these placeholder rows fail.
+    entry = client.get(f"/v1/integrity/{ids[-1]}", headers=headers).json()
+    (tmp_path / "entry.json").write_text(json.dumps(entry))
+    result = verify_with_rust(
+        tmp_path, proof, checkpoint, key, "--entry", str(tmp_path / "entry.json")
+    )
+    assert result.returncode == 1
+    assert "hash to" in result.stdout, result.stdout
 
 
 @needs_rust
@@ -434,3 +566,88 @@ def test_the_rust_client_rejects_what_the_api_did_not_sign_off(client, database,
 
     # A leaf the client recomputed itself is not the one the server proved.
     rejected("--chain-hash", "cd" * 32)
+
+    # Garbage from a tampering server is a rejection (1), not a usage error
+    # (2), so a script that alerts on status 1 still alerts.
+    rejected(proof={"not": "a proof"})
+    rejected(checkpoint={**checkpoint, "peaks": "none"})
+
+
+# ---------------------------------------------------------------------------
+# End to end, on the real path: no Python stand-in for any signer
+# ---------------------------------------------------------------------------
+
+needs_real_tools = pytest.mark.skipif(
+    not (VERIFY_PROOF.exists() and CHECKPOINT_MMR.exists() and RUST_ADMISSION),
+    reason="build with: cargo build -p relic-proof -p relic-mmr-worker -p relic-ingest",
+)
+
+
+@needs_real_tools
+def test_a_real_admission_is_proven_end_to_end(client, database, chain, tmp_path):
+    """relic-ingest-fidbf admits a FIDBF and signs its integrity entry,
+    relic-checkpoint-mmr checkpoints the chain, the API serves the proof, and
+    relic-verify-proof ties it to that entry, with the key and account pinned
+    from the worker's key file rather than read from the API."""
+    admission = admit_fidbf(database, tmp_path)
+    source_id = admission.ids["source"]
+    ((integrity_id,),) = database.execute(
+        "SELECT integrity_id FROM catalogue.integrity WHERE source_id = %s", (source_id,)
+    )
+    mmr_uid, mmr_key = _ssh_account(database, tmp_path, "mmr", None, "system")
+    pin = _openssh_public_key(mmr_key.with_suffix(".pub")).hex()
+    worker = subprocess.run(
+        [str(CHECKPOINT_MMR), "--database-url", database.worker_url,
+         "--system-user-id", str(mmr_uid), "--key", str(mmr_key)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert worker.returncode == 0, worker.stderr
+    signed = json.loads(worker.stdout)
+    assert signed["inserted"] is True
+    checkpoint_id = signed["mmr_checkpoint_id"]
+
+    headers = headers_for(client, database)
+    response = client.get(f"/v1/integrity/{integrity_id}/proof", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["mmr_checkpoint_id"] == checkpoint_id  # the default
+    documents = {
+        "proof": response.json(),
+        "checkpoint": client.get(f"/v1/mmr-checkpoints/{checkpoint_id}", headers=headers).json(),
+        "entry": client.get(f"/v1/integrity/{integrity_id}", headers=headers).json(),
+    }
+    pins = {
+        "--public-key": pin,
+        "--system-uid": str(mmr_uid),
+        "--commitment": signed["commitment"],
+        "--source-id": str(source_id),
+    }
+
+    def verify(changes=None, **flags):
+        files = []
+        for name, document in {**documents, **(changes or {})}.items():
+            path = tmp_path / f"{name}.json"
+            path.write_text(json.dumps(document))
+            files += [f"--{name}", str(path)]
+        options = [item for pair in {**pins, **flags}.items() for item in pair]
+        return subprocess.run(
+            [str(VERIFY_PROOF), *files, *options], capture_output=True, text=True
+        )
+
+    verified = verify()
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert f"signed by system account {mmr_uid}" in verified.stdout
+    assert "recomputed from the integrity entry" in verified.stdout
+    assert f"source {source_id} (FIDBF)" in verified.stdout
+    assert verified.stderr == ""
+
+    entry = documents["entry"]
+    for label, result in {
+        "another record hash": verify({"entry": {**entry, "record_hash": "ab" * 32}}),
+        "another source": verify({"entry": {**entry, "source_id": str(uuid.uuid4())}}),
+        "a source I did not submit": verify(**{"--source-id": str(uuid.uuid4())}),
+        "another system account": verify(**{"--system-uid": str(chain.system_uid)}),
+        "another key": verify(**{"--public-key": SigningKey.generate().verify_key.encode().hex()}),
+        "another checkpoint": verify(**{"--commitment": "00" * 32}),
+    }.items():
+        assert result.returncode == 1, (label, result.stdout, result.stderr)
+        assert result.stdout.startswith("NOT VERIFIED:"), label

@@ -16,6 +16,7 @@ license_assertion_migration="$relic_dir/database/migrations/005-license-assertio
 ocsf_component_migration="$relic_dir/database/migrations/006-ocsf-provenance-and-software-components.sql"
 behavioural_composition_migration="$relic_dir/database/migrations/007-behavioural-compositions.sql"
 key_auth_migration="$relic_dir/database/migrations/008-key-auth-registration-and-rbac.sql"
+integrity_order_migration="$relic_dir/database/migrations/009-integrity-id-follows-chain.sql"
 
 for migration_file in \
     "$mmr_migration" \
@@ -24,7 +25,8 @@ for migration_file in \
     "$license_assertion_migration" \
     "$ocsf_component_migration" \
     "$behavioural_composition_migration" \
-    "$key_auth_migration"; do
+    "$key_auth_migration" \
+    "$integrity_order_migration"; do
     if [[ ! -f "$migration_file" ]]; then
         echo "Migration file not found: $migration_file" >&2
         exit 1
@@ -176,4 +178,25 @@ else
         -f "$key_auth_migration"
 
     echo "Installed key authentication, pending registration and RBAC hardening."
+fi
+
+integrity_order_installed="$(
+    runuser -u postgres -- psql --no-psqlrc -X -d "$database_name" -Atqc \
+        "SELECT CASE WHEN EXISTS (
+            SELECT 1
+              FROM pg_trigger
+             WHERE tgrelid = 'catalogue.integrity'::regclass
+               AND tgname = 'integrity_follows_id_order'
+        ) THEN 1 ELSE 0 END"
+)"
+
+if [[ "$integrity_order_installed" == "1" ]]; then
+    echo "Integrity id order is already tied to the chain."
+else
+    runuser -u postgres -- psql --no-psqlrc -X \
+        -v ON_ERROR_STOP=1 \
+        -d "$database_name" \
+        -f "$integrity_order_migration"
+
+    echo "Installed the rule that integrity ids follow the chain (inclusion proofs rely on it)."
 fi

@@ -75,6 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.rate_limiter = RateLimiter()
     app.state.upload_slots = UploadSlots()
     app.state.upload_budget = ByteBudget()
+    # Proofs being built at once (CPU-bound; see routers/proofs.py): the same
+    # non-blocking per-process counter as uploads.
+    app.state.proof_slots = UploadSlots()
 
     # add_middleware prepends: SecurityHeaders (added last) is outermost and
     # also covers 413 responses produced by the body limit.

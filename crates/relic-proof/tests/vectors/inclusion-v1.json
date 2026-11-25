@@ -22,6 +22,17 @@
     "bff7f4567e8a61ad8bbf023bfcb3037a05304874308860b931e44ca3f2182d7d",
     "73250f572322aa4461bb6f8ef2fa96495f0645da5ee72573ec556be6a669efea"
   ],
+  "checkpoint_signature": {
+    "commitment": "74a27410a6fdd8abad17ef35d767a0969f424826a7bddcc5facd0171fa3b02d3",
+    "created_at_micros": 1790000000654321,
+    "format_version": 1,
+    "last_integrity_id": 4242,
+    "leaf_count": 13,
+    "public_key": "0d7550754e0800a5d237eef5826035766b9b3e5a15868a940ab289958788e3b0",
+    "seed": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "system_signature": "458bfd98be9f1206ef2792d2d564bd7ff2c3ed4601459d930e42b4ab470c4fad7305106119ef933c818ef157f876cf19a5f6ff24382051f456bd18cdc4cdd90d",
+    "system_uid": "1d0c5f00-7e57-4a11-8c0d-00000000c0de"
+  },
   "description": "MMR frontiers and inclusion proofs over chain hashes sha256(\"relic-mmr-vector-<i>\")",
   "mmrs": [
     {

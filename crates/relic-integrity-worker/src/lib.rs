@@ -11,53 +11,13 @@ use relic_crypto::{Digest32, SystemSigner, hash_fields, verify_digest_signature}
 use thiserror::Error;
 use uuid::Uuid;
 
-const CHAIN_HASH_DOMAIN: &[u8] = b"RELIC:integrity-chain-hash:v1";
+/// The chain-hash definition lives in the database-free `relic-proof` crate,
+/// so an offline verifier recomputes exactly what this worker signs.
+pub use relic_proof::IntegrityEnvelope;
+
 const SIGNATURE_DOMAIN: &[u8] = b"RELIC:integrity-system-signature:v1";
 const BSIM_RECORD_DOMAIN: &[u8] = b"RELIC:bsim-record:v1";
 const PROVENANCE_RECORD_DOMAIN: &[u8] = b"RELIC:provenance-record:v1";
-
-/// Unsigned, canonical fields committed by an integrity-chain entry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IntegrityEnvelope {
-    /// Identifier of the source record being admitted.
-    pub source_id: String,
-    /// Fixed source-type discriminator.
-    pub source_type: String,
-    /// Hash of the admitted record's canonical bytes.
-    pub record_hash: Digest32,
-    /// Previous chain hash, or `None` for the one genesis entry.
-    pub prev_hash: Option<Digest32>,
-    /// Canonical format version.
-    pub format_version: u32,
-    /// Worker-selected UTC timestamp in Unix microseconds.
-    pub created_at_unix_micros: i64,
-    /// Database identity of the integrity-signing system account.
-    pub system_uid: String,
-}
-
-impl IntegrityEnvelope {
-    /// Calculate the chain hash over every field of this envelope.
-    #[must_use]
-    pub fn chain_hash(&self) -> Digest32 {
-        let previous = self
-            .prev_hash
-            .map_or([0_u8; 32], |digest| *digest.as_bytes());
-        let has_previous = [u8::from(self.prev_hash.is_some())];
-        hash_fields(
-            CHAIN_HASH_DOMAIN,
-            &[
-                self.source_id.as_bytes(),
-                self.source_type.as_bytes(),
-                self.record_hash.as_bytes(),
-                &has_previous,
-                &previous,
-                &self.format_version.to_be_bytes(),
-                &self.created_at_unix_micros.to_be_bytes(),
-                self.system_uid.as_bytes(),
-            ],
-        )
-    }
-}
 
 /// The stored `BSim` fields an integrity entry commits to.
 #[derive(Clone, Copy, Debug)]
