@@ -189,6 +189,16 @@ A checkpoint commits to a specific leaf count and ordered set of peaks. The
 private signing key remains outside PostgreSQL; PostgreSQL stores the
 commitment, signature and public signing-key identity required for verification.
 
+Verifiers do not take that public key from the API: they check every
+checkpoint against a *pin* of the MMR system account (its user id and public
+key) that the operator publishes elsewhere. Deriving, publishing and handing
+over the pin is documented in
+[`deployment.md`](deployment.md#pinning-the-mmr-public-key), and the steps for
+a key rotation or a leaked key in
+[`mmr-public-key.md`](mmr-public-key.md#when-the-key-changes). Rotating the key
+has not been rehearsed, and key custody as a whole remains an open decision
+(listed at the end of this page).
+
 Checkpoint insertion is atomic, but checkpoint creation is intentionally not
 part of source-record admission. A record is authoritative only after its
 object digest, integrity-chain hash and integrity system signature have been
@@ -224,8 +234,7 @@ pins the construction, and the Python API is tested against the same file.
 **Verification** (`relic_mmr_worker::proof` and `relic-verify-proof`):
 
 1. verify the checkpoint's commitment and Ed25519 system signature with a key
-   obtained independently of the proof (the operator's published *pin*; see
-   [Pinning the MMR public key](deployment.md#pinning-the-mmr-public-key));
+   obtained independently of the proof;
 2. check that the proof and the checkpoint agree on the checkpoint id, leaf
    count and commitment, and that the peaks have the shape the leaf count
    dictates;
@@ -275,10 +284,7 @@ the meaning of an earlier signed checkpoint.
 - Which internal nodes are retained and whether safe pruning is ever allowed.
 - Consistency proofs between two checkpoints.
 - A node cache, so a proof no longer costs the size of its peak (see below).
-- Production key custody and rotation procedure. Publishing a pin of the
-  public key is documented
-  ([`deployment.md`](deployment.md#pinning-the-mmr-public-key)); rotating the
-  key is not rehearsed.
+- Production key custody and rotation procedure.
 - Monitoring thresholds and the operational recovery procedure.
 
 No runtime adapter should quietly settle one of these choices. The selected

@@ -178,22 +178,37 @@ journalctl -u relic-checkpoint-mmr -n 50
 ```
 
 A failed run leaves the unit in the `failed` state and the previous checkpoint
-untouched, so the next run simply tries again. To check that checkpoints are
-fresh, run this as `relic_auditor` from the hourly `relic-verify` cron job or
-any monitoring that can run SQL:
+untouched, so the next run simply tries again. To check that checkpoints keep
+up, run this as `relic_auditor` from the hourly `relic-verify` cron job or any
+monitoring that can run SQL, and **alert when `oldest_uncovered_age` is over 2
+hours**:
 
 ```sql
--- No row: no checkpoint yet. uncovered_entries grows as entries are admitted
--- and falls back to 0 after each run; alert if it stays above 0 for ~2 hours.
-SELECT (SELECT count(*) FROM catalogue.integrity) - c.leaf_count AS uncovered_entries,
-       now() - c.created_at AS age
-FROM catalogue.mmr_checkpoint c
-ORDER BY c.mmr_checkpoint_id DESC LIMIT 1;
+-- Entries no checkpoint covers yet, how long the oldest of them has waited,
+-- and the age of the newest checkpoint. Only format 1 is checkpointed today.
+WITH latest AS (
+    SELECT last_integrity_id, created_at
+      FROM catalogue.mmr_checkpoint
+     WHERE format_version = 1
+     ORDER BY leaf_count DESC
+     LIMIT 1
+)
+SELECT count(*) AS uncovered_entries,
+       now() - min(i.created_at) AS oldest_uncovered_age,
+       now() - (SELECT created_at FROM latest) AS checkpoint_age
+  FROM catalogue.integrity AS i
+ WHERE i.integrity_id > coalesce((SELECT last_integrity_id FROM latest), 0);
 ```
 
-`age` is the age of the newest checkpoint, so it also grows when nothing new
-was admitted. Read it together with `uncovered_entries`: an old checkpoint is a
-problem only if `uncovered_entries` is not 0.
+Alert on the age of the oldest waiting entry, not on the count: with steady
+admissions and an hourly run, some entries are almost always waiting for the
+next run, so `uncovered_entries` is rarely 0 even when everything works. An
+entry waits at most about one interval plus the run itself, so
+`oldest_uncovered_age` over 2 hours means at least one run is missing or
+failing; it is `NULL` when nothing waits, and before the first checkpoint it
+measures the whole chain. `checkpoint_age` alone means little, since it also
+grows whenever nothing new was admitted. The query relies on integrity ids
+following the chain, which migration 009 enforces.
 
 ### Pinning the MMR public key
 
@@ -204,11 +219,13 @@ and proof together, and everything verifies. The key must come from somewhere
 the API does not control: the operator publishes a *pin* once, and verifiers
 keep it.
 
-The pin is the MMR system account's user id and its Ed25519 public key (64
-lowercase hex characters, the form `relic-verify-proof --public-key` takes).
+The pin is the MMR system account's user id **and** its Ed25519 public key
+(64 lowercase hex characters). Verifiers pass both: `--public-key` checks the
+signature, `--system-uid` checks that the checkpoint names that account.
 
-Operator, once, when the key is created. On the host, derive the pin from the
-key file (add `-P "$(cat <passphrase file>)"` if the key has a passphrase):
+Operator, once, when the key is created. On the host, derive the key from the
+private key file. `ssh-keygen` asks for the passphrase if the key has one;
+do not pass it with `-P`, which shows it in the process list:
 
 ```bash
 ssh-keygen -y -f /var/lib/relic/keys/mmr_ed25519 \
@@ -224,28 +241,33 @@ curl -s -H "Authorization: Bearer $TOKEN" "$API/v1/users/$MMR_UID" | jq -r .publ
 ```
 
 Each installation generates its own key during its initial setup, so the pin
-belongs to that installation's operator. Give `MMR user id + public key`
+belongs to that installation's operator, not to this repository. Give it
 directly to each partner that verifies proofs, by a channel other than the
 API, and publish it where they can find it independently of the API (the
-operator's own site, or [`mmr-public-key.md`](mmr-public-key.md) in this
-repository if you want to record it here, via a pull request that a second
-person checks against the server). That file also says how to hand it over
-and how to replace a key. A change of the published pin is a security event,
-not routine news.
+operator's own site or configuration repository).
+[`mmr-public-key.md`](mmr-public-key.md) has the template, the two-person
+check, how to hand the pin over and what to do when the key changes or leaks.
+A change of the published pin is a security event, not routine news.
 
-Verifier: always pass the pinned value, never one read from the API:
+Verifier: always pass the pinned values, never ones read from the API, and the
+entry the proof is about (`GET /v1/integrity/{id}`), so that the proof is tied
+to that entry's source and record rather than to a hash the server reported:
 
 ```bash
-PIN=<64 hex characters from the operator>
-relic-verify-proof --proof proof.json --checkpoint checkpoint.json \
-    --public-key "$PIN" --chain-hash "$CHAIN_HASH"
+PIN_KEY=<64 hex characters from the operator>
+PIN_UID=<MMR system user id from the operator>
+relic-verify-proof --proof proof.json --checkpoint checkpoint.json --entry entry.json \
+    --public-key "$PIN_KEY" --system-uid "$PIN_UID"
 ```
 
-If the key ever has to change, create a new MMR system account and key,
-publish the new pin **before** its first checkpoint, and keep the old pin:
-checkpoints signed by the old key stay verifiable with it. This has not been
-rehearsed end to end, and key custody and rotation as a whole remain an open
-decision in [`integrity-mmr.md`](integrity-mmr.md#decisions-still-open).
+A pin has no expiry that a verifier could enforce: a checkpoint's timestamp is
+signed by the same key, so whoever holds a key can sign checkpoints dated
+whenever they like. Trust in a key ends only when its pin is withdrawn, which
+is why a key change follows
+[the procedure in `mmr-public-key.md`](mmr-public-key.md#when-the-key-changes).
+It has not been rehearsed end to end, and key custody and rotation as a whole
+remain an open decision in
+[`integrity-mmr.md`](integrity-mmr.md#decisions-still-open).
 
 ## 5. Object storage and `relic-admit`
 
