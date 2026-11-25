@@ -137,7 +137,7 @@ are implemented.
 | `/v1/integrity`, `/v1/integrity/{id}` | `source_id` | The append-only, system-signed integrity chain, in insertion order (integer IDs, `after` is an integer). |
 | `/v1/mmr-checkpoints`, `/v1/mmr-checkpoints/{id}` | — | Signed Merkle Mountain Range checkpoints over the chain (integer IDs). |
 | `/v1/mmr-checkpoints/latest` | — | The checkpoint covering the most integrity rows; `404` before the first. |
-| `/v1/integrity/{id}/proof` | `checkpoint_id` (default: the newest) | An inclusion proof: the sibling hashes that lead from the entry's `chain_hash` to a peak of a signed checkpoint. Check it offline with `relic-verify-proof` ([`docs/integrity-mmr.md`](../../docs/integrity-mmr.md#inclusion-proofs)). `409` the entry is not covered (yet); `501` unknown checkpoint format; `503` the entry sits in a peak above `RELIC_PROOF_MAX_PEAK_LEAVES`; `429` past `RELIC_PROOF_RATE_LIMIT_PER_MINUTE` proofs per account. |
+| `/v1/integrity/{id}/proof` | `checkpoint_id` (default: the newest checkpoint in a format the server can prove) | An inclusion proof: the sibling hashes that lead from the entry's `chain_hash` to a peak of a signed checkpoint. Check it offline, together with `/v1/integrity/{id}`, with `relic-verify-proof --entry` ([`docs/integrity-mmr.md`](../../docs/integrity-mmr.md#inclusion-proofs)). `409` the entry is not covered (yet); `501` the checkpoint's format is unknown (checked first); `503` the entry sits in a peak above `RELIC_PROOF_MAX_PEAK_LEAVES` (the detail names an older checkpoint that can prove it, if any), or `RELIC_PROOF_MAX_CONCURRENT` proofs are already being built (with `Retry-After`); `429` past `RELIC_PROOF_RATE_LIMIT_PER_MINUTE` proofs per account. |
 
 ### Corpus submissions
 

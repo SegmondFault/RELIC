@@ -1310,6 +1310,7 @@ dependencies = [
  "clap",
  "postgres",
  "relic-crypto",
+ "relic-proof",
  "thiserror",
  "uuid",
  "zeroize",
@@ -1323,9 +1324,9 @@ dependencies = [
  "clap",
  "postgres",
  "relic-crypto",
+ "relic-proof",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "uuid",
  "zeroize",
@@ -1338,6 +1339,20 @@ dependencies = [
  "md-5",
  "relic-crypto",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "relic-proof"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "relic-crypto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

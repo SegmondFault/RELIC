@@ -1,10 +1,10 @@
 """Merkle Mountain Range inclusion proofs.
 
-This is a deliberate, minimal port of ``crates/relic-mmr-worker`` (the leaf and
+This is a deliberate, minimal port of ``crates/relic-proof`` (the leaf and
 node hashes in ``lib.rs`` and ``proof.rs``). The Rust crate remains the source
 of truth: ``tests/test_mmr_vectors.py`` pins this module to the vectors the
-Rust test suite generates (``tests/vectors/inclusion-v1.json``), so any
-divergence fails CI on both sides.
+Rust test suite generates (``crates/relic-proof/tests/vectors/inclusion-v1.json``),
+so any divergence fails CI on both sides.
 
 Shape of the tree
 -----------------
@@ -79,6 +79,21 @@ def locate_peak(leaf_index: int, leaf_count: int) -> tuple[int, int]:
         if start <= leaf_index < start + (1 << height):
             return start, height
     raise ProofError("leaf outside every peak")  # pragma: no cover
+
+
+def small_peak_limit(leaf_index: int, max_peak_leaves: int) -> int:
+    """Exclusive upper bound on the leaf counts at which ``leaf_index`` sits
+    in a peak of at most ``max_peak_leaves`` leaves.
+
+    The peaks taller than ``h`` cover exactly the first ``leaf_count`` rounded
+    down to a multiple of ``2 ** (h + 1)`` leaves, so with ``h`` the tallest
+    allowed height the leaf is in an allowed peak exactly when
+    ``leaf_index < leaf_count < small_peak_limit(leaf_index, max_peak_leaves)``.
+    """
+    if leaf_index < 0 or max_peak_leaves < 1:
+        raise ProofError("leaf index and peak size must be non-negative and positive")
+    span = 1 << max_peak_leaves.bit_length()  # 2 ** (h + 1), h = floor(log2(cap))
+    return (leaf_index // span + 1) * span
 
 
 def _levels(chain_hashes: Sequence[bytes], start: int, height: int) -> list[list[bytes]]:

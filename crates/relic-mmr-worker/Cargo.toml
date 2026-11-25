@@ -11,23 +11,17 @@ rust-version.workspace = true
 name = "relic-checkpoint-mmr"
 path = "src/main.rs"
 
-[[bin]]
-name = "relic-verify-proof"
-path = "src/bin/verify-proof.rs"
-
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 relic-crypto = { path = "../relic-crypto" }
+relic-proof = { path = "../relic-proof" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 uuid = { version = "1.18", features = ["serde", "v4"] }
 zeroize = "1.8"
-
-[dev-dependencies]
-tempfile = "3.23"
 
 [lints]
 workspace = true

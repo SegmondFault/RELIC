@@ -468,7 +468,7 @@ class MmrCheckpoint(BaseModel):
 
 
 class InclusionProof(BaseModel):
-    """Canonical proof encoding, shared with the Rust crate (``relic-mmr-worker``)."""
+    """Canonical proof encoding, shared with the Rust crate (``relic-proof``)."""
 
     format_version: int
     leaf_index: int = Field(description="Zero-based position of the entry on the integrity chain")
