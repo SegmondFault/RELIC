@@ -77,9 +77,12 @@ PGOPTIONS="-c role=relic_owner" psql_super "$superuser_uri/relic" \
     -f "$repo_dir/database/relic-schema-v1.sql"
 psql_super "$superuser_uri/relic" -f "$repo_dir/database/relic-access-v1.sql"
 
-# Migrations 002-007 are already folded into relic-schema-v1.sql.
-for migration in "$repo_dir"/database/migrations/0{08..99}-*.sql; do
-    [[ -f "$migration" ]] || continue
+# Migrations 002-007 are already folded into relic-schema-v1.sql. The glob
+# sorts by name, i.e. by number. (Not `0{08..99}`: the bash 3.2 that macOS
+# ships does not zero-pad brace ranges, and would silently skip 008.)
+for migration in "$repo_dir"/database/migrations/[0-9][0-9][0-9]-*.sql; do
+    number="$(basename "$migration")"
+    (( 10#${number%%-*} >= 8 )) || continue
     psql_super "$superuser_uri/relic" -f "$migration"
 done
 
