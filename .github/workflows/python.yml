@@ -21,6 +21,8 @@ jobs:
   pytest:
     name: API tests (PostgreSQL)
     runs-on: ubuntu-latest
+    # A hung step fails the job instead of running for GitHub's six-hour default.
+    timeout-minutes: 30
     # Disposable server: the test session drops and recreates its `relic`
     # database (database/tests/setup-disposable-db.sh). Never reuse real
     # credentials here.
