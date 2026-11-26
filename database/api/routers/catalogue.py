@@ -132,6 +132,13 @@ _RELEASE_COMPONENT = (
     " WHERE sr.software_release_id = t.software_release_id)"
 )
 
+_REVOKED_COMPOSITION_MEMBER = """EXISTS (
+            SELECT 1 FROM catalogue.composition_member AS am
+              JOIN catalogue.revocation AS ar
+                ON ar.target_type = am.target_type AND ar.target_id = am.target_id
+               AND ar.decision = 'approved'
+             WHERE am.behavioural_composition_id = t.behavioural_composition_id)"""
+
 
 @dataclass(frozen=True)
 class _Resource:
@@ -349,12 +356,7 @@ BEHAVIOURAL_COMPOSITIONS = _Resource(
         {_revoked('behavioural_composition', 'behavioural_composition_id')},
         {_ancestor_revoked(
             _is_revoked('provenance', 't.evidence_provenance_id'),
-            """EXISTS (
-            SELECT 1 FROM catalogue.composition_member AS am
-              JOIN catalogue.revocation AS ar
-                ON ar.target_type = am.target_type AND ar.target_id = am.target_id
-               AND ar.decision = 'approved'
-             WHERE am.behavioural_composition_id = t.behavioural_composition_id)""",
+            _REVOKED_COMPOSITION_MEMBER,
         )}""",
     detail="""coalesce((
         SELECT json_agg(json_build_object(
