@@ -115,6 +115,160 @@ With a dedicated worker user (see section 1), give the directory to that user
 instead of `ns`. The API never reads these keys, and the directory is not
 mounted into any container.
 
+### Hourly MMR checkpoint (systemd timer)
+
+An integrity entry gets an inclusion proof only once a signed checkpoint
+covers it; until then `GET /v1/integrity/{id}/proof` answers `409`. So
+`relic-checkpoint-mmr` runs every hour. It is safe to run often: when the
+latest checkpoint already covers the whole chain it verifies it and exits
+without inserting anything, and a run can never overlap the previous one
+(one `oneshot` unit). Every run rebuilds the chain from genesis, which is cheap
+at today's size; revisit the interval if the chain grows into millions of rows.
+
+`/etc/relic/mmr.env` (mode 0600, owner `ns`):
+
+```
+RELIC_DATABASE_URL=host=/var/run/postgresql dbname=relic user=relic_worker
+RELIC_MMR_SYSTEM_USER_ID=<MMR system account>
+RELIC_MMR_KEY=/var/lib/relic/keys/mmr_ed25519
+# RELIC_MMR_KEY_PASSPHRASE_FILE=/var/lib/relic/keys/mmr_ed25519.pass   (only if the key has a passphrase)
+```
+
+`/etc/systemd/system/relic-checkpoint-mmr.service`:
+
+```ini
+[Unit]
+Description=RELIC MMR checkpoint (one run)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=ns
+EnvironmentFile=/etc/relic/mmr.env
+ExecStart=/srv/relic/target/release/relic-checkpoint-mmr
+TimeoutStartSec=30min
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+```
+
+`/etc/systemd/system/relic-checkpoint-mmr.timer`:
+
+```ini
+[Unit]
+Description=Hourly RELIC MMR checkpoint
+
+[Timer]
+OnCalendar=hourly
+AccuracySec=1m
+# Run once at boot if the machine was off at the scheduled time.
+Persistent=true
+Unit=relic-checkpoint-mmr.service
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start relic-checkpoint-mmr.service    # first run now; prints the checkpoint as JSON
+sudo systemctl enable --now relic-checkpoint-mmr.timer
+systemctl list-timers relic-checkpoint-mmr.timer     # next and last run
+journalctl -u relic-checkpoint-mmr -n 50
+```
+
+A failed run leaves the unit in the `failed` state and the previous checkpoint
+untouched, so the next run simply tries again. To check that checkpoints keep
+up, run this as `relic_auditor` from the hourly `relic-verify` cron job or any
+monitoring that can run SQL, and **alert when `oldest_uncovered_age` is over 2
+hours**:
+
+```sql
+-- Entries no checkpoint covers yet, how long the oldest of them has waited,
+-- and the age of the newest checkpoint. Only format 1 is checkpointed today.
+WITH latest AS (
+    SELECT last_integrity_id, created_at
+      FROM catalogue.mmr_checkpoint
+     WHERE format_version = 1
+     ORDER BY leaf_count DESC
+     LIMIT 1
+)
+SELECT count(*) AS uncovered_entries,
+       now() - min(i.created_at) AS oldest_uncovered_age,
+       now() - (SELECT created_at FROM latest) AS checkpoint_age
+  FROM catalogue.integrity AS i
+ WHERE i.integrity_id > coalesce((SELECT last_integrity_id FROM latest), 0);
+```
+
+Alert on the age of the oldest waiting entry, not on the count: with steady
+admissions and an hourly run, some entries are almost always waiting for the
+next run, so `uncovered_entries` is rarely 0 even when everything works. An
+entry waits at most about one interval plus the run itself, so
+`oldest_uncovered_age` over 2 hours means at least one run is missing or
+failing; it is `NULL` when nothing waits, and before the first checkpoint it
+measures the whole chain. `checkpoint_age` alone means little, since it also
+grows whenever nothing new was admitted. The query relies on integrity ids
+following the chain, which migration 009 enforces.
+
+### Pinning the MMR public key
+
+An inclusion proof shows that an entry is in a checkpoint **signed by the key
+you give the verifier**. If a client takes that key from the same API that
+serves the proof, whoever controls the API can serve its own key, checkpoint
+and proof together, and everything verifies. The key must come from somewhere
+the API does not control: the operator publishes a *pin* once, and verifiers
+keep it.
+
+The pin is the MMR system account's user id **and** its Ed25519 public key
+(64 lowercase hex characters). Verifiers pass both: `--public-key` checks the
+signature, `--system-uid` checks that the checkpoint names that account.
+
+Operator, once, when the key is created. On the host, derive the key from the
+private key file. `ssh-keygen` asks for the passphrase if the key has one;
+do not pass it with `-P`, which shows it in the process list:
+
+```bash
+ssh-keygen -y -f /var/lib/relic/keys/mmr_ed25519 \
+    | awk '{print $2}' | base64 -d | tail -c 32 | od -An -v -tx1 | tr -d ' \n'; echo
+```
+
+Then check that it is the key the database knows for the MMR account. Both
+commands must print the same 64 characters (the worker also refuses to run
+with a key that does not match its registered account):
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$API/v1/users/$MMR_UID" | jq -r .public_key
+```
+
+Each installation generates its own key during its initial setup, so the pin
+belongs to that installation's operator, not to this repository. Give it
+directly to each partner that verifies proofs, by a channel other than the
+API, and publish it where they can find it independently of the API (the
+operator's own site or configuration repository).
+[`mmr-public-key.md`](mmr-public-key.md) has the template, the two-person
+check, how to hand the pin over and what to do when the key changes or leaks.
+A change of the published pin is a security event, not routine news.
+
+Verifier: always pass the pinned values, never ones read from the API, and the
+entry the proof is about (`GET /v1/integrity/{id}`), so that the proof is tied
+to that entry's source and record rather than to a hash the server reported:
+
+```bash
+PIN_KEY=<64 hex characters from the operator>
+PIN_UID=<MMR system user id from the operator>
+relic-verify-proof --proof proof.json --checkpoint checkpoint.json --entry entry.json \
+    --public-key "$PIN_KEY" --system-uid "$PIN_UID"
+```
+
+A pin has no expiry that a verifier could enforce: a checkpoint's timestamp is
+signed by the same key, so whoever holds a key can sign checkpoints dated
+whenever they like. Trust in a key ends only when its pin is withdrawn, which
+is why a key change follows
+[the procedure in `mmr-public-key.md`](mmr-public-key.md#when-the-key-changes).
+It has not been rehearsed end to end, and key custody and rotation as a whole
+remain an open decision in
+[`integrity-mmr.md`](integrity-mmr.md#decisions-still-open).
+
 ## 5. Object storage and `relic-admit`
 
 The API stages uploaded FIDBF objects in `/var/lib/relic/staging` (its only

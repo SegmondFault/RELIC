@@ -199,6 +199,16 @@ A checkpoint commits to a specific leaf count and ordered set of peaks. The
 private signing key remains outside PostgreSQL; PostgreSQL stores the
 commitment, signature and public signing-key identity required for verification.
 
+Verifiers do not take that public key from the API: they check every
+checkpoint against a *pin* of the MMR system account (its user id and public
+key) that the operator publishes elsewhere. Deriving, publishing and handing
+over the pin is documented in
+[`deployment.md`](deployment.md#pinning-the-mmr-public-key), and the steps for
+a key rotation or a leaked key in
+[`mmr-public-key.md`](mmr-public-key.md#when-the-key-changes). Rotating the key
+has not been rehearsed, and key custody as a whole remains an open decision
+(listed at the end of this page).
+
 Checkpoint insertion is atomic, but checkpoint creation is intentionally not
 part of source-record admission. A record is authoritative only after its
 object digest, integrity-chain hash and integrity system signature have been
@@ -324,7 +334,9 @@ the meaning of an earlier signed checkpoint.
 
 ## Decisions still open
 
-- Checkpoint cadence: every append, time-based, count-based or explicit batch.
+- Checkpoint cadence: decided for now as time-based, every hour from a systemd
+  timer ([`deployment.md`](deployment.md#hourly-mmr-checkpoint-systemd-timer)).
+  Checkpoints per append or per entry count remain open.
 - Whether publication waits for sealing or exposes a visible pending state.
 - Which internal nodes are retained and whether safe pruning is ever allowed.
 - Consistency proofs between two checkpoints. Until they exist, whoever holds
