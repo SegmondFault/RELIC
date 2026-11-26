@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     staging_dir: Path = Path("/var/lib/relic/staging")
     # The content-addressed FIDBF object store (read-only mount).
     fidbf_root: Path = Path("/srv/relic-objects")
+    # Inclusion proofs are rebuilt from the chain on every request, at a cost
+    # proportional to the size of the peak that holds the entry. Peaks above
+    # the cap are refused (503, naming an older checkpoint that can prove the
+    # entry) until a node cache exists. The cap is not a fix: once the chain
+    # reaches twice the cap, the oldest half of it is only provable against
+    # older checkpoints (docs/integrity-mmr.md, "Cost").
+    proof_max_peak_leaves: int = Field(2**18, ge=1)
+    proof_rate_limit_per_minute: int = Field(30, ge=1)
+    # Proofs built at once by this process, at most one per account; more are
+    # refused with 503 and Retry-After. Building one is pure-Python CPU work
+    # that holds the GIL, so a few concurrent large proofs would otherwise slow
+    # every other request.
+    proof_max_concurrent: int = Field(2, ge=1)
     global_rate_limit_per_minute: int = Field(300, ge=1)
     auth_rate_limit_per_minute: int = Field(10, ge=1)
     registration_rate_limit_per_hour: int = Field(5, ge=1)

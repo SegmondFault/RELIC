@@ -19,6 +19,7 @@ from .routers import (
     components,
     flags,
     health,
+    proofs,
     registrations,
     revocations,
     submissions,
@@ -74,6 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.rate_limiter = RateLimiter()
     app.state.upload_slots = UploadSlots()
     app.state.upload_budget = ByteBudget()
+    # Proofs being built at once (CPU-bound; see routers/proofs.py): the same
+    # non-blocking per-process counter as uploads.
+    app.state.proof_slots = UploadSlots()
 
     # add_middleware prepends: SecurityHeaders (added last) is outermost and
     # also covers 413 responses produced by the body limit.
@@ -104,7 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     v1 = APIRouter(prefix="/v1", dependencies=[Depends(global_rate_limit)])
     for module in (
-        auth, accounts, registrations, catalogue, submissions, components, flags, revocations
+        auth, accounts, registrations, catalogue, proofs, submissions, components, flags, revocations
     ):
         v1.include_router(module.router)
     v1.include_router(submissions.upload_router)

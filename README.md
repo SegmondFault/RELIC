@@ -116,7 +116,8 @@ an eight-step **MMR visual explainer** showing how permanent leaf indexes and
 peaks evolve as records are appended.
 
 See [`docs/integrity-mmr.md`](docs/integrity-mmr.md). The immutable checkpoint
-schema and a working PostgreSQL checkpoint worker. The proof API remains planned.
+schema and a working PostgreSQL checkpoint worker. Inclusion proofs are served by
+`GET /v1/integrity/{id}/proof` and checked offline by `relic-verify-proof`.
 
 The deliberately separate object, integrity-chain and MMR worker boundaries
 are documented in [`docs/workers.md`](docs/workers.md). Their pure calculation

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from . import accounts, auth, catalogue, flags, health, revocations, submissions
+from . import accounts, auth, catalogue, flags, health, proofs, revocations, submissions
 
 __all__ = [
     "accounts",
@@ -8,6 +8,7 @@ __all__ = [
     "catalogue",
     "flags",
     "health",
+    "proofs",
     "revocations",
     "submissions",
 ]

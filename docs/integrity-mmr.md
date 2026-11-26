@@ -1,8 +1,9 @@
 # Integrity service and Merkle Mountain Range
 
-> **Status:** the pure Rust hashing, frontier and checkpoint-signing core is
-> implemented. The production PostgreSQL adapter, key-custody integration,
-> proof API, service supervision and publication states remain future work.
+> **Status:** the pure Rust hashing, frontier and checkpoint-signing core, the
+> PostgreSQL checkpoint worker, inclusion proofs (Rust and API) and the offline
+> proof verifier are implemented. Consistency proofs, key-custody integration,
+> service supervision and publication states remain future work.
 
 This page records the intended boundary for RELIC's future append-only
 integrity layer. It is deliberately descriptive rather than executable so the
@@ -82,9 +83,13 @@ right-hand frontier changes.
 
 The design separates the tree algorithm from storage and operations:
 
-- **`relic-mmr-worker`** contains the Rust append, peak, commitment and
-  checkpoint-signing implementation plus the fail-closed PostgreSQL
-  reconciler exposed as `relic-checkpoint-mmr`. Proofs remain future work.
+- **`relic-proof`** contains the Rust append, peak, commitment and
+  checkpoint-signing implementation, the integrity-chain hash of an entry,
+  the inclusion-proof construction and verification (`proof` module) and the
+  offline `relic-verify-proof` command (`client` module). It has no database
+  dependency, so a partner who only verifies proofs builds this crate alone.
+- **`relic-mmr-worker`** adds the fail-closed PostgreSQL reconciler exposed as
+  `relic-checkpoint-mmr`, on top of `relic-proof`.
 - **`relic-checkpoint-mmr`** is the current explicit one-shot operational
   entry point. It independently rebuilds the integrity chain, verifies the
   latest checkpoint, signs any advanced frontier and inserts once.
@@ -108,6 +113,13 @@ notification can be lost.
 - An assigned index is immutable and is never reused.
 - The existing `prev_hash` relationship supplies the order. The database's
   single-genesis and single-successor constraints prevent forks.
+- `integrity_id` order is the same order: an entry must extend the entry with
+  the highest `integrity_id` below its own (migration 009). The checkpoint
+  worker and `relic-verify` follow `prev_hash`; the API's proofs use the
+  indexed `integrity_id` order, and the rule keeps the two from diverging. Only
+  the database owner can write an explicit `integrity_id` (`OVERRIDING SYSTEM
+  VALUE`); one above the identity sequence would make every later insert
+  refused, so never do it on a live chain.
 - A checkpoint points to its newest covered row through
   `mmr_checkpoint.last_integrity_id`. Every earlier covered leaf is reached by
   following `prev_hash` back to the genesis row.
@@ -133,12 +145,13 @@ The implemented calculation fixes these rules:
 
 Changing any of these is a format migration, not a silent implementation
 detail. No leaf duplication or invented padding leaf is used to handle an odd
-count. Deterministic proof encoding remains future work.
+count. The inclusion-proof encoding is specified below.
 
 ## Database responsibilities
 
-The existing `integrity` table remains unchanged. One additional table,
-`mmr_checkpoint`, stores each immutable signed checkpoint:
+The `integrity` table keeps its columns; migration 009 only adds the
+id-order rule above. One additional table, `mmr_checkpoint`, stores each
+immutable signed checkpoint:
 
 - `last_integrity_id` is a foreign key to the newest covered integrity row;
 - `leaf_count` states how many chain rows are covered from genesis through that
@@ -192,6 +205,112 @@ object digest, integrity-chain hash and integrity system signature have been
 committed in one database transaction. MMR status is a separate derived state;
 a delayed checkpoint does not weaken the integrity admission rule.
 
+## Inclusion proofs
+
+An inclusion proof shows that one integrity row (a leaf) is covered by a
+signed checkpoint, without downloading or replaying the chain.
+
+**What a proof is.** Every peak is a perfect binary tree whose first leaf is a
+multiple of its size, so the path from a leaf to its peak follows from the leaf
+index alone. A proof is only the sibling hashes from the leaf level upwards,
+plus the leaf index and the leaf count of the checkpoint it targets. The
+sibling at level `k` is on the right when bit `k` of the leaf index is `0`, and
+on the left otherwise. The number of siblings is the height of the peak that
+holds the leaf, and that peak is fixed by the leaf count (the set bits of
+`leaf_count`, largest first). A proof is logarithmic: 10 hashes for 1 024
+leaves. It is only meaningful for the `leaf_count` it names; a later checkpoint
+needs its own proof, and an earlier checkpoint stays provable.
+
+**Encoding (version 1).** Canonical JSON with exactly these fields, lowercase
+hexadecimal digests and no others (unknown fields and versions are rejected):
+
+```json
+{"format_version": 1, "leaf_index": 4, "leaf_count": 6, "siblings": ["<64 hex>"]}
+```
+
+The Rust crate is the source of truth; `crates/relic-proof/tests/vectors/inclusion-v1.json`
+pins the construction and a checkpoint signature, and the Python API is tested
+against the same file.
+
+**What a proof is about.** The proof is about a *chain hash*, and a chain hash
+is only as meaningful as where it came from. The integrity entry's
+`chain_hash` is a hash of its fields (source id and type, record hash,
+previous chain hash, format version, timestamp, integrity system account). The
+verifier therefore takes the entry itself (`GET /v1/integrity/{id}`),
+recomputes the chain hash from those fields and requires it to be the proven
+leaf. A verified proof then says: *this source and this record hash are on
+the chain, at this position, under a checkpoint signed by the pinned key.*
+Comparing the proof with a chain hash taken from the API shows nothing more
+than that the server agrees with itself, which is why `relic-verify-proof`
+warns when given neither `--entry` nor a `--chain-hash` you computed yourself.
+
+**Verification** (`relic_proof::client` and `relic-verify-proof`):
+
+1. verify the checkpoint's commitment and Ed25519 system signature with the
+   *pinned* public key, and with `--system-uid` that the checkpoint names the
+   pinned system account (`--commitment` accepts only one exact checkpoint);
+2. check that the proof and the checkpoint agree on the checkpoint id, leaf
+   count and commitment, and that the peaks have the shape the leaf count
+   dictates;
+3. with `--entry`, recompute the entry's chain hash from its fields, require
+   the entry's stated chain hash and the proof's leaf to equal it, and with
+   `--source-id` / `--record-hash` require the entry to be about your source
+   and record;
+4. fold the leaf (`chain_hash`) and the siblings into a peak and require it to
+   be one of the checkpoint's signed peaks.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/integrity/$ID/proof?checkpoint_id=$N" > proof.json
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/mmr-checkpoints/$N"                   > checkpoint.json
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/integrity/$ID"                        > entry.json
+relic-verify-proof --proof proof.json --checkpoint checkpoint.json --entry entry.json \
+    --public-key "$PINNED_KEY" --system-uid "$PINNED_MMR_UID" --source-id "$MY_SOURCE_ID"
+```
+
+The first line of the output is stable for scripts (`VERIFIED: leaf ...` or
+`NOT VERIFIED: ...`); the following lines say where the leaf came from, which
+entry it is and which checkpoint signed it. The entry's `integrity_id` and the
+checkpoint's `mmr_checkpoint_id` are reported as the server numbered them: no
+signature covers either, and what is proven is the leaf's position and
+content. Exit status `0` verified; `1` not verified, including anything wrong
+with what the server sent (malformed or oversized JSON is a rejection, so a
+script that alerts on `1` cannot be dodged with garbage); `2` the command line
+is wrong or a local file cannot be opened.
+
+`--record-hash` takes a record hash you computed yourself. Recomputing it from
+the original record is not built into `relic-verify-proof`; for FIDBF
+admissions it depends on the admission time, and `relic-verify` recomputes it
+from the database for auditors.
+
+**API** (`GET /v1/integrity/{id}/proof`, any role). The server builds the proof
+from the integrity chain and checks it against the stored checkpoint before
+answering; if they disagree it answers `500` and logs the cause rather than
+serve a proof the checkpoint would reject. Without `checkpoint_id` it uses the
+newest checkpoint *in the format it can prove*, so a checkpoint in a newer
+format never hides the valid ones. An explicit checkpoint in an unknown format
+is `501` whether or not it covers the entry; `409` means the checkpoint does
+not cover the entry (yet).
+
+**Cost.** Internal nodes are not stored, so a proof rebuilds the peak that holds
+the entry: work proportional to that peak's size, run off the event loop but
+still Python holding the GIL (about 0.7 s of CPU for a peak of 262 144 leaves
+on a fast laptop, plus reading that many rows; more on a small server).
+Three limits bound it:
+
+- `RELIC_PROOF_MAX_PEAK_LEAVES` (default 262 144) refuses larger peaks with
+  `503`. The detail names an older checkpoint that holds the entry in a small
+  enough peak (`checkpoint_id=N`), or says that none does.
+- `RELIC_PROOF_MAX_CONCURRENT` (default 2) proofs are built at once per API
+  process, at most one per account; beyond it `503` with `Retry-After: 1`.
+- `RELIC_PROOF_RATE_LIMIT_PER_MINUTE` limits each account.
+
+The cap is a stopgap, not a fix. The oldest entries always sit in the largest
+peak, so once the chain reaches twice the cap (524 288 entries at the
+default) the newest checkpoint can no longer prove at least the oldest half of
+it; those entries stay provable only against older checkpoints. Lowering the
+cap moves that cliff down, not away. **A node cache (stored internal nodes) is
+required before the chain approaches twice the cap**, not an optimisation.
+
 ## Verification and recovery
 
 RELIC must be able to rebuild the expected MMR independently from the immutable
@@ -199,8 +318,8 @@ leaves and compare it with stored nodes, peaks and signed checkpoints. A
 rebuild defaults to dry-run and reports the first divergence. Recovery must not
 overwrite conflicting evidence merely to make verification pass.
 
-Proof generation and verification must state which checkpoint and leaf count
-they target. A later checkpoint may cover more leaves, but it must not change
+Proof generation and verification state which checkpoint and leaf count they
+target (see [Inclusion proofs](#inclusion-proofs)). A later checkpoint may cover more leaves, but it must not change
 the meaning of an earlier signed checkpoint.
 
 ## Decisions still open
@@ -208,7 +327,12 @@ the meaning of an earlier signed checkpoint.
 - Checkpoint cadence: every append, time-based, count-based or explicit batch.
 - Whether publication waits for sealing or exposes a visible pending state.
 - Which internal nodes are retained and whether safe pruning is ever allowed.
-- Proof API, proof encoding and proof-retention requirements.
+- Consistency proofs between two checkpoints. Until they exist, whoever holds
+  the MMR key could show different clients different histories; a client
+  cannot tell that two checkpoints extend one another.
+- A node cache, so a proof no longer costs the size of its peak. Required
+  before the chain reaches twice `RELIC_PROOF_MAX_PEAK_LEAVES` (see
+  [Cost](#inclusion-proofs) above).
 - Production key custody and rotation procedure.
 - Monitoring thresholds and the operational recovery procedure.
 

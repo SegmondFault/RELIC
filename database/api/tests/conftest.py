@@ -52,6 +52,7 @@ def make_settings(database_url: str, **overrides) -> Settings:
         global_rate_limit_per_minute=100_000,
         auth_rate_limit_per_minute=100_000,
         registration_rate_limit_per_hour=100_000,
+        proof_rate_limit_per_minute=100_000,
     )
     values.update(overrides)
     return Settings(_env_file=None, **values)

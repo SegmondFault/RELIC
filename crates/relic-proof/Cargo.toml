@@ -1,0 +1,30 @@
+[package]
+name = "relic-proof"
+version = "0.1.0"
+description = "Offline verification of RELIC MMR checkpoints and inclusion proofs"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Deliberately no database driver: partners who only verify proofs build this
+# crate alone (`cargo build --release -p relic-proof`).
+
+[[bin]]
+name = "relic-verify-proof"
+path = "src/bin/verify-proof.rs"
+
+[dependencies]
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive"] }
+relic-crypto = { path = "../relic-crypto" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+uuid = "1.18"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[lints]
+workspace = true

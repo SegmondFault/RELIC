@@ -75,6 +75,20 @@ checkpoints, so a compromised API cannot add forged system-signed rows to the
 chain. PostgreSQL requires every stored signature to be 64 bytes but does not
 verify signatures; the system keys stay with the workers.
 
+## Proof verifier (`relic-verify-proof`)
+
+A client that wants to check that an integrity entry is covered by a signed MMR
+checkpoint does not need the database. It takes three documents from the API
+(the proof, the checkpoint it names and the integrity entry) and the MMR
+system account's public key and user id from the operator's pin, never from
+the API. `relic-verify-proof` recomputes the entry's chain hash from its
+fields, verifies the checkpoint's Ed25519 signature and that the proof leads
+from that chain hash to one of the checkpoint's peaks. Exit status `0`
+verified, `1` not verified (including unusable server responses), `2` bad
+command line or unreadable file. It lives in the database-free `relic-proof`
+crate: `cargo build --release -p relic-proof`. See
+[`docs/integrity-mmr.md`](integrity-mmr.md#inclusion-proofs).
+
 ## Verifier (`relic-verify`)
 
 PostgreSQL checks roles, lengths and who a row names, but not signatures.

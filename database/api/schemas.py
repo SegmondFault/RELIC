@@ -467,6 +467,24 @@ class MmrCheckpoint(BaseModel):
     system_signature: Signature
 
 
+class InclusionProof(BaseModel):
+    """Canonical proof encoding, shared with the Rust crate (``relic-proof``)."""
+
+    format_version: int
+    leaf_index: int = Field(description="Zero-based position of the entry on the integrity chain")
+    leaf_count: int = Field(description="Leaves of the checkpoint this proof targets")
+    siblings: list[Sha256] = Field(description="Sibling hashes from the leaf level upwards")
+
+
+class MmrInclusionProof(BaseModel):
+    integrity_id: int
+    chain_hash: Sha256 = Field(description="The leaf: the entry's chain_hash")
+    mmr_checkpoint_id: int
+    leaf_count: int
+    commitment: Sha256
+    proof: InclusionProof
+
+
 # ---------------------------------------------------------------------------
 # Licence assertions and classifications (signed by Analysts)
 # ---------------------------------------------------------------------------
