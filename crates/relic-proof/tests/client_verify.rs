@@ -684,12 +684,12 @@ impl Cli {
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes())
-                .unwrap();
+            if let Err(error) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+                // A command that rejects its arguments before reading stdin
+                // may close the pipe before this test process writes to it.
+                // Its exit status and stderr are asserted by the caller.
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
             child.wait_with_output().unwrap()
         } else {
             command.output().unwrap()
