@@ -147,6 +147,43 @@ If an MMR proof and Bloom result disagree, the authoritative chain/MMR wins and
 the Bloom artifact is quarantined. A delayed or unavailable Bloom artifact has
 no effect on admission or integrity.
 
+### Freshness and exact-tail strategy
+
+The artifact digest and signed checkpoint make freshness mechanically
+testable, but they prove different properties. `payload_sha256` proves that the
+published filter bytes have not changed. The signed tuple
+`(checkpoint_id, integrity_chain_head, mmr_leaf_count)` identifies the exact
+authoritative prefix from which those bytes claim to have been derived. Neither
+property alone proves that the builder inserted every source value; count
+checks, complete known-positive validation and deterministic independent
+rebuilds provide that assurance.
+
+Before returning a negative result, a consumer resolves the latest verified
+MMR checkpoint and compares it with the manifest:
+
+1. If checkpoint ID, chain head and leaf count match, the filter is current for
+   that verified prefix.
+2. If the manifest names a verified ancestor and a durable mapping identifies
+   every later integrity entry, the filter may answer for its covered prefix
+   only after PostgreSQL checks the exact uncovered tail.
+3. If there are uncheckpointed admitted entries, they form part of the exact
+   tail and must also be checked.
+4. If ancestry, coverage or the exact tail cannot be established, the result is
+   `unknown` and PostgreSQL answers the complete query.
+5. A manifest that claims the same checkpoint with a different chain head or
+   leaf count is invalid and is quarantined.
+
+For example, a filter covering integrity entries `1..3,000,000` may safely
+accelerate a query at tip `3,000,150` only if PostgreSQL checks entries
+`3,000,001..3,000,150` exactly. A Bloom negative plus a negative exact-tail
+lookup is a current negative answer; the Bloom negative alone is only an answer
+at its declared checkpoint.
+
+Version 1 may choose the simpler rule of requiring exact equality with the
+latest verified checkpoint and treating every mismatch as `unknown`. Exact-tail
+support is an optimization and must not be inferred from timestamps or
+non-durable worker state.
+
 The current schema does not map each individual function/object value directly
 to an integrity ordinal. Therefore the first builder may publish only from a
 repeatable-read snapshot in which the selected verified MMR checkpoint covers
@@ -456,6 +493,7 @@ mode.
 | Failure or threat | Required behaviour |
 | --- | --- |
 | Stale filter used as current | Require exact checkpoint equality; otherwise return `unknown` or query PostgreSQL |
+| New entries exist after the filter checkpoint | Check the complete durable integrity tail exactly; if coverage cannot be proven, return `unknown` and use PostgreSQL for the complete query |
 | Bloom positive treated as fact | API labels it `possibly_present`; authoritative confirmation is mandatory |
 | Bloom negative used for admission/uniqueness | Forbidden; database constraints and transaction checks always run |
 | Payload corruption/truncation | Digest, length, header and offset validation reject before mapping |

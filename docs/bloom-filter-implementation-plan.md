@@ -32,6 +32,10 @@ resource evidence is reviewed.
 - [ ] Specify a durable authoritative coverage query.
 - [ ] Use repeatable-read read-only snapshot and verify checkpoint equals its
       covered integrity tip.
+- [ ] Record and verify the signed checkpoint tuple: checkpoint ID, integrity
+      chain head and MMR leaf count.
+- [ ] Verify exact source-row and distinct-value counts, then run a complete
+      known-positive pass over the finished artifact.
 - [ ] Add namespace/format single-publisher lock and idempotent retries.
 - [ ] Load only a dedicated external Bloom signing identity.
 - [ ] Produce dry-run artifacts and reports without publication.
@@ -53,6 +57,11 @@ conflicts fail closed, and rollback requires no bitset mutation.
 
 - [ ] Add exact-checkpoint manifest/payload download with immutable caching.
 - [ ] Add bounded batch membership endpoint with three-state results.
+- [ ] Compare the artifact checkpoint tuple with the latest verified checkpoint
+      before every negative-answer path.
+- [ ] Initially require exact checkpoint equality. Add exact-tail fallback only
+      after a durable record-to-integrity mapping proves complete coverage;
+      otherwise return `unknown` and query PostgreSQL.
 - [ ] Implement client-side signature/digest/structure verification before mmap.
 - [ ] Add hot-swap with request-safe old mapping and database-only fallback.
 - [ ] Add authentication, rate limiting and metrics without logging queried
