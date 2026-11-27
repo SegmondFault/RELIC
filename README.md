@@ -4,6 +4,8 @@ Whoever you are, you're here very early... As its early, but I didn't want to le
 
 **Reproducible Evidence for Lineage and Integrity of Code**
 
+First and foremost, this is currently a research project, and Cardboard Aided Design - the parts fit, but nothing is tested or validated. Yet.
+
 RELIC exists to make bounded, evidence backed assertions about the **legitimacy, heritage and origin of functions within binaries**.
 
 It combines BSim data, FIDBF records, reproducible provenance and a small supporting layer of machine learning. 
